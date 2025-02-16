@@ -32,6 +32,7 @@ class DownloadLibrary:
         ext_exclude=None,
         platform_include=None,
         purchase_keys=None,
+        print_keys=None,
         trove=False,
         update=False,
     ):
@@ -225,6 +226,10 @@ class DownloadLibrary:
             )
         except Exception:
             logger.error("Failed to get order key {order_id}".format(order_id=order_id))
+            return
+
+        if self.print_only:
+            logger.info(order_id)
             return
 
         logger.debug("Order request: {order_r}".format(order_r=order_r))

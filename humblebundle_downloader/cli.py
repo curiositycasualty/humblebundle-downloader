@@ -93,6 +93,12 @@ def parse_args(args):
             "products/bundle download page. Can set multiple"
         ),
     )
+    parser.add_argument(
+        "-P",
+        "--print-keys",
+        action="store_true",
+        help="Only print purchase download keys then exit",
+    )
 
     return parser.parse_args(args)
 
