@@ -215,6 +215,10 @@ class DownloadLibrary:
         return trove_products
 
     def _process_order_id(self, order_id):
+        if self.print_keys:
+            logger.info(str(order_id))
+            return
+
         order_url = "https://www.humblebundle.com/api/v1/order/{order_id}?all_tpkds=true".format(
             order_id=order_id
         )
@@ -232,9 +236,6 @@ class DownloadLibrary:
         except Exception:
             logger.error("Failed to get order key {order_id}".format(order_id=order_id))
             return
-
-        if self.print_keys:
-            logger.info(str(order_id))
 
         logger.debug("Order request: {order_r}".format(order_r=order_r))
         order = order_r.json()
