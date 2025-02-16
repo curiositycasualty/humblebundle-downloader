@@ -71,6 +71,8 @@ class DownloadLibrary:
                 {"cookie": "_simpleauth_sess={}".format(cookie_auth)}
             )
 
+        logger.debug(self.print_keys)
+
     def start(self):
         self.cache_file = os.path.join(self.library_path, ".cache.json")
         self.cache_data = self._load_cache_data(self.cache_file)
