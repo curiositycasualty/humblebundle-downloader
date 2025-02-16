@@ -218,6 +218,9 @@ class DownloadLibrary:
         order_url = "https://www.humblebundle.com/api/v1/order/{order_id}?all_tpkds=true".format(
             order_id=order_id
         )
+
+        logger.debug("Order request: {order_url}".format(order_url=order_url))
+
         try:
             order_r = self.session.get(
                 order_url,
@@ -231,8 +234,7 @@ class DownloadLibrary:
             return
 
         if self.print_keys:
-            logger.info(order_id)
-            return
+            logger.info(str(order_id))
 
         logger.debug("Order request: {order_r}".format(order_r=order_r))
         order = order_r.json()
