@@ -50,6 +50,8 @@ class DownloadLibrary:
             platform_include = []
         self.platform_include = list(map(str.lower, platform_include))
 
+        self.print_keys = print_keys
+
         self.purchase_keys = purchase_keys
         self.trove = trove
         self.update = update
