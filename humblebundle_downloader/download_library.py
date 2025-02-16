@@ -228,7 +228,7 @@ class DownloadLibrary:
             logger.error("Failed to get order key {order_id}".format(order_id=order_id))
             return
 
-        if self.print_only:
+        if self.print_keys:
             logger.info(order_id)
             return
 
