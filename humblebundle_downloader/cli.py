@@ -111,12 +111,13 @@ def cli():
 
     DownloadLibrary(
         cli_args.library_path,
-        cookie_path=cli_args.cookie_file,
         cookie_auth=cli_args.session_auth,
-        progress_bar=cli_args.progress,
-        ext_include=cli_args.include,
+        cookie_path=cli_args.cookie_file,
         ext_exclude=cli_args.exclude,
+        ext_include=cli_args.include,
         platform_include=cli_args.platform,
+        print_only=cli_args.print_only,
+        progress_bar=cli_args.progress,
         purchase_keys=cli_args.keys,
         trove=cli_args.trove,
         update=cli_args.update,
