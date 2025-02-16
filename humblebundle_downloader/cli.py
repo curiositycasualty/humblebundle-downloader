@@ -95,7 +95,7 @@ def parse_args(args):
     )
     parser.add_argument(
         "-P",
-        "--print-keys",
+        "--only-print-keys",
         action="store_true",
         help="Only print purchase download keys then exit",
     )

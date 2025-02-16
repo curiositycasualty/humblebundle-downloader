@@ -32,7 +32,7 @@ class DownloadLibrary:
         ext_exclude=None,
         platform_include=None,
         purchase_keys=None,
-        print_keys=None,
+        only_print_keys=False,
         trove=False,
         update=False,
     ):
@@ -50,7 +50,7 @@ class DownloadLibrary:
             platform_include = []
         self.platform_include = list(map(str.lower, platform_include))
 
-        self.print_keys = print_keys
+        self.only_print_keys = only_print_keys
 
         self.purchase_keys = purchase_keys
         self.trove = trove
@@ -71,7 +71,8 @@ class DownloadLibrary:
                 {"cookie": "_simpleauth_sess={}".format(cookie_auth)}
             )
 
-        logger.debug(self.print_keys)
+        logger.debug(self.only_print_keys)
+        logger.debug(only_print_keys)
 
     def start(self):
         self.cache_file = os.path.join(self.library_path, ".cache.json")
@@ -217,7 +218,7 @@ class DownloadLibrary:
         return trove_products
 
     def _process_order_id(self, order_id):
-        if self.print_keys:
+        if self.only_print_keys:
             logger.info(str(order_id))
             return
 
