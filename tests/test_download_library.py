@@ -1,3 +1,5 @@
+import io
+
 import pytest
 
 import time
@@ -9,6 +11,7 @@ import threading
 
 from humblebundle_downloader.download_library import (
     DownloadLibrary,
+    ProgressReporter,
     _coerce_size,
     _file_ext,
     _human_size,
@@ -654,3 +657,102 @@ def test_stream_to_file_rejects_a_short_transfer(tmp_path):
     dl = DownloadLibrary("fake_library_path")
     with pytest.raises(ValueError):
         dl._stream_to_file(ChunkedResponse(b"only 6"), str(part), False, 0, 99)
+
+
+###
+# ProgressReporter
+###
+class FakeTTY(io.StringIO):
+    def isatty(self):
+        return True
+
+
+def _reporter(tty=True):
+    return ProgressReporter(stream=FakeTTY() if tty else io.StringIO())
+
+
+def test_reporter_counts_and_percentages():
+    reporter = _reporter()
+    reporter.file_started("one.cbz", 1000)
+    reporter.file_progress("one.cbz", 620)
+    frame = reporter.render(100)
+    assert "1 active" in frame
+    assert "one.cbz 62%" in frame
+
+
+def test_reporter_counts_finished_files_and_their_bytes():
+    reporter = _reporter()
+    reporter.file_started("one.cbz", 1000)
+    reporter.file_progress("one.cbz", 1000)
+    reporter.file_finished("one.cbz")
+    frame = reporter.render(100)
+    assert "1 done" in frame
+    assert "0 active" in frame
+    assert reporter._bytes == 1000
+
+
+def test_reporter_reports_failures_separately():
+    reporter = _reporter()
+    reporter.file_started("bad.bin", 10)
+    reporter.file_finished("bad.bin", ok=False)
+    frame = reporter.render(100)
+    assert "1 failed" in frame
+    assert reporter._bytes == 0
+
+
+def test_reporter_handles_an_unknown_size():
+    reporter = _reporter()
+    reporter.file_started("mystery.bin", None)
+    reporter.file_progress("mystery.bin", 2048)
+    frame = reporter.render(100)
+    assert "mystery.bin 2.00 KiB" in frame
+    assert "%" not in frame
+
+
+def test_reporter_stays_within_the_terminal_width():
+    reporter = _reporter()
+    for i in range(12):
+        name = "quite-a-long-name-{0}.cbz".format(i)
+        reporter.file_started(name, 1000)
+        reporter.file_progress(name, 500)
+    for width in (30, 60, 100):
+        assert len(reporter.render(width)) <= width - 1
+
+
+def test_reporter_renders_a_single_line():
+    reporter = _reporter()
+    reporter.file_started("one.cbz", 1000)
+    assert "\n" not in reporter.render(100)
+    assert "\r" not in reporter.render(100)
+
+
+def test_reporter_progress_for_an_unknown_file_is_ignored():
+    reporter = _reporter()
+    reporter.file_progress("never-started.bin", 500)
+    assert "never-started" not in reporter.render(100)
+
+
+def test_reporter_is_disabled_off_a_terminal():
+    reporter = _reporter(tty=False)
+    assert reporter.enabled() is False
+    reporter.start()
+    reporter.paint()
+    reporter.stop()
+    assert reporter.stream.getvalue() == ""
+
+
+def test_reporter_writes_and_then_wipes_the_line():
+    reporter = _reporter()
+    reporter.file_started("one.cbz", 1000)
+    reporter.paint()
+    assert reporter.stream.getvalue() != ""
+    reporter.clear()
+    assert reporter.stream.getvalue().endswith("\033[K")
+
+
+def test_reporter_only_used_for_parallel_runs_with_progress():
+    assert DownloadLibrary("x", jobs=1, progress_bar=True)._progress is None
+    assert DownloadLibrary("x", jobs=4, progress_bar=False)._progress is None
+    parallel = DownloadLibrary("x", jobs=4, progress_bar=True)
+    assert parallel._progress is not None
+    assert parallel._show_bar is False

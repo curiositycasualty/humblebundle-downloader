@@ -115,13 +115,29 @@ Four files download at once by default. Change the number with `--jobs`/`-j`:
 `--no-parallel` goes back to one file at a time, and overrides `--jobs`, so it still works when
 `-j` is baked into a shell alias.
 
-Because several `\r` progress bars writing at once is unreadable, `--progress` draws the per-file
-bar only when running sequentially. In parallel each file reports once, as it finishes:
+Because several `\r` progress bars writing at once is unreadable, `--progress` shows one status
+line for the whole pool instead of a bar per file. A single reporter thread owns that line, so
+concurrent transfers cannot shred each other's output:
+
+```
+12 done · 4 active · 1.42 GiB · 11.3 MiB/s  one.cbz 62%  two.cbz 25%  three.pdf 9%  four.epub 81%
+```
+
+It carries how many files are finished, how many are in flight with each one's percentage, the
+total fetched so far and the current throughput, and it is truncated to your terminal width. Files
+that report no size show bytes fetched rather than a percentage, and failures are counted
+separately once any have happened.
+
+Each file also announces itself as it lands, on its own line above the status line:
 
 ```
 Downloaded Some Comic Vol1.cbz (24.10 MiB in 3.4s)
 Downloaded Another Book.epub (8.40 MiB in 1.1s)
 ```
+
+Running sequentially (`--no-parallel`) keeps the original per-file bar. The status line is only
+drawn to a terminal: piped or redirected output gets the completion lines alone, with no carriage
+returns to clean up afterwards.
 
 A few notes on what parallelism does and does not touch. Each worker gets its own
 `requests.Session`, built from the authenticated one, since `requests.Session` is not documented as

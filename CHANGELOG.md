@@ -6,6 +6,10 @@
 - Added `--dry-run`/`-n` to report the number of files and total size of a download before
   downloading anything, broken down per bundle
 - Added `--print-urls` to print the url of each file being collected to stdout, one per line
+- `--progress` now shows a live status line during parallel downloads: files finished, transfers in
+  flight with each one's percentage, total fetched and current throughput, truncated to the
+  terminal width. One reporter thread owns the line, so concurrent transfers cannot shred each
+  other's output, and nothing is drawn when output is not a terminal
 - Interrupted transfers now resume with an http `Range` request instead of starting over. Support
   is detected rather than assumed: a `206` appends to what was already fetched, a `200` means the
   server ignored the request and the file restarts. Content is written to `<file>.part` and moved

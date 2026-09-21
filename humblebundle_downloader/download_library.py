@@ -5,6 +5,7 @@ import time
 import email
 import queue
 import parsel
+import shutil
 import logging
 import datetime
 import requests
@@ -35,6 +36,153 @@ USER_AGENT = (
     "humblebundle-downloader/{version} "
     "(+https://github.com/xtream1101/humblebundle-downloader)"
 ).format(version=_package_version())
+
+
+class ProgressReporter:
+    """Owns one line of the terminal and repaints it on a timer.
+
+    Workers only ever update counters; nothing but this thread writes to
+    the status line, which is what keeps several concurrent transfers
+    from shredding each other's output.
+    """
+
+    def __init__(self, stream=None, interval=0.25, window=5.0):
+        self.stream = sys.stderr if stream is None else stream
+        self.interval = interval
+        self.window = window
+
+        self._lock = threading.Lock()
+        self._active = {}          # name -> [downloaded, total or None]
+        self._done = 0
+        self._failed = 0
+        self._bytes = 0            # bytes from finished files
+        self._samples = []         # (when, bytes seen so far)
+        self._thread = None
+        self._stop = threading.Event()
+        self._painted = False
+
+    def enabled(self):
+        try:
+            return bool(self.stream.isatty())
+        except Exception:
+            return False
+
+    def start(self):
+        if not self.enabled() or self._thread is not None:
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        if self._thread is None:
+            return
+        self._stop.set()
+        self._thread.join()
+        self._thread = None
+        self.clear()
+
+    def file_started(self, name, total):
+        with self._lock:
+            self._active[name] = [0, total]
+
+    def file_progress(self, name, downloaded):
+        # Hot path: one dict write per chunk, no formatting, no i/o
+        with self._lock:
+            entry = self._active.get(name)
+            if entry is not None:
+                entry[0] = downloaded
+
+    def file_finished(self, name, ok=True):
+        with self._lock:
+            entry = self._active.pop(name, None)
+            if ok:
+                self._done += 1
+                if entry is not None:
+                    self._bytes += entry[0]
+            else:
+                self._failed += 1
+
+    def clear(self):
+        """Wipe the status line so ordinary log output lands cleanly"""
+        if not self._painted or not self.enabled():
+            return
+        try:
+            self.stream.write("\r\033[K")
+            self.stream.flush()
+        except Exception:
+            pass
+        self._painted = False
+
+    def _rate(self, seen):
+        """Bytes per second over the recent window"""
+        now = time.time()
+        self._samples.append((now, seen))
+        while len(self._samples) > 2 and now - self._samples[0][0] > self.window:
+            self._samples.pop(0)
+        if len(self._samples) < 2:
+            return None
+        elapsed = self._samples[-1][0] - self._samples[0][0]
+        if elapsed <= 0:
+            return None
+        return (self._samples[-1][1] - self._samples[0][1]) / elapsed
+
+    def render(self, width=80):
+        with self._lock:
+            active = sorted(self._active.items())
+            done = self._done
+            failed = self._failed
+            seen = self._bytes + sum(entry[0] for _, entry in active)
+
+        parts = ["{done} done".format(done=done)]
+        if failed:
+            parts.append("{failed} failed".format(failed=failed))
+        parts.append("{count} active".format(count=len(active)))
+        parts.append(_human_size(seen))
+
+        rate = self._rate(seen)
+        if rate is not None:
+            parts.append("{rate}/s".format(rate=_human_size(rate)))
+
+        head = " · ".join(parts)
+
+        details = []
+        for name, (downloaded, total) in active:
+            if total:
+                details.append("{name} {percent}%".format(
+                    name=name, percent=int(100 * downloaded / total)
+                ))
+            else:
+                details.append("{name} {size}".format(
+                    name=name, size=_human_size(downloaded)
+                ))
+
+        line = head
+        if details:
+            line = head + "  " + "  ".join(details)
+        if len(line) > width - 1:
+            line = line[:max(0, width - 2)] + "…"
+        return line
+
+    def _loop(self):
+        while not self._stop.is_set():
+            self.paint()
+            self._stop.wait(self.interval)
+
+    def paint(self):
+        if not self.enabled():
+            # Nothing but a terminal wants carriage returns
+            return
+        try:
+            width = shutil.get_terminal_size((80, 20)).columns
+        except Exception:
+            width = 80
+        try:
+            self.stream.write("\r\033[K" + self.render(width))
+            self.stream.flush()
+            self._painted = True
+        except Exception:
+            pass
 
 
 def _file_size(path):
@@ -176,9 +324,12 @@ class DownloadLibrary:
         self.jobs = max(1, int(jobs))
         self.retries = max(0, int(retries))
         self.progress_bar = progress_bar
-        # Several \r progress bars writing at once is unreadable, so in
-        # parallel mode each file reports once, when it finishes
+        # Several \r progress bars writing at once is unreadable, so the
+        # per-file bar is for sequential runs. In parallel one reporter
+        # thread owns a single status line for the whole pool
         self._show_bar = progress_bar and self.jobs == 1
+        self._show_status = progress_bar and self.jobs > 1
+        self._progress = ProgressReporter() if self._show_status else None
 
         self._queue = None
         self._workers = []
@@ -371,6 +522,9 @@ class DownloadLibrary:
         logger.info(
             "Downloading with {jobs} parallel jobs".format(jobs=self.jobs)
         )
+        if self._progress is not None:
+            self._progress.start()
+
         # Bounded, so traversal cannot run far ahead of the downloads
         self._queue = queue.Queue(maxsize=self.jobs * 4)
         for _ in range(self.jobs):
@@ -389,6 +543,9 @@ class DownloadLibrary:
 
         self._workers = []
         self._queue = None
+
+        if self._progress is not None:
+            self._progress.stop()
 
     def _worker(self):
         while True:
@@ -1231,6 +1388,7 @@ class DownloadLibrary:
         # it is whole, so an interrupted transfer can be resumed and can
         # never be mistaken for a finished file
         part_file = local_filename + ".part"
+        label = os.path.basename(local_filename)
         written = 0
         try:
             if rename_str:
@@ -1250,6 +1408,10 @@ class DownloadLibrary:
                     local_filename=local_filename
                 )
             )
+
+            if self._progress is not None:
+                self._progress.file_finished(label, ok=False)
+                self._progress.clear()
 
             # Clean up the partial transfer. Any previously downloaded
             # copy of the file is left untouched
@@ -1274,6 +1436,9 @@ class DownloadLibrary:
                 file_info["url_last_modified"] = datetime.datetime.now().strftime(
                     "%a, %d %b %Y %H:%M:%S %Z"
                 )
+            if self._progress is not None:
+                self._progress.file_finished(label, ok=True)
+
             self._update_cache_data(cache_file_key, file_info)
             self._log_completed(local_filename, written, time.time() - started)
             result = True
@@ -1293,6 +1458,9 @@ class DownloadLibrary:
         """
         if self.jobs == 1:
             return
+        if self._progress is not None:
+            # Land this line on a clean row; the reporter repaints after
+            self._progress.clear()
         logger.info(
             "Downloaded {name} ({size} in {elapsed:.1f}s)".format(
                 name=os.path.basename(local_filename),
@@ -1315,10 +1483,16 @@ class DownloadLibrary:
         already = 0
         total = _coerce_size(response.headers.get("Content-Length"))
         attempt = 0
+        label = os.path.basename(local_filename)
+
+        if self._progress is not None:
+            self._progress.file_started(label, total)
 
         while True:
             try:
-                self._stream_to_file(response, part_file, append, already, total)
+                self._stream_to_file(
+                    response, part_file, append, already, total, label
+                )
                 return _file_size(part_file)
             except KeyboardInterrupt:
                 raise
@@ -1349,6 +1523,10 @@ class DownloadLibrary:
                 response, append, total = resumed
                 if append is False:
                     already = 0
+                if self._progress is not None:
+                    # A resume changes what the whole file weighs
+                    self._progress.file_started(label, total)
+                    self._progress.file_progress(label, already)
 
     def _reopen_for_resume(self, remote_file, part_file, already):
         """Ask for the rest of the file.
@@ -1411,7 +1589,9 @@ class DownloadLibrary:
             "start over instead of resuming"
         )
 
-    def _stream_to_file(self, response, part_file, append, already, total):
+    def _stream_to_file(
+        self, response, part_file, append, already, total, label=None
+    ):
         """One pass of the transfer. `already` is what the part file
         holds when appending, so the progress bar counts the whole file
         """
@@ -1422,6 +1602,8 @@ class DownloadLibrary:
                 outfile.write(data)
                 if self._show_bar:
                     self._draw_bar(written, total)
+                elif self._progress is not None and label is not None:
+                    self._progress.file_progress(label, written)
 
         if total is not None and written < total:
             raise ValueError(
