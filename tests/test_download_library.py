@@ -3,6 +3,7 @@ from humblebundle_downloader.download_library import (
     _coerce_size,
     _file_ext,
     _human_size,
+    _order_error,
 )
 
 
@@ -280,3 +281,92 @@ def test_prefer_format_normalises_dots_and_case():
     struct = [_web("a.pdf", 10), _web("a.CBZ", 20)]
     selected = _select(struct, prefer_format=[".CbZ"])
     assert _names(selected) == ["a.CBZ"]
+
+
+###
+# _order_error / skipping unusable orders
+###
+def test_order_error_reports_api_error_field():
+    assert "Unauthorized" in _order_error({"_errors": "Unauthorized"})
+    assert "missing_order" in _order_error({"error_code": "missing_order"})
+
+
+def test_order_error_reports_wrong_type():
+    assert "list" in _order_error([])
+
+
+def test_order_error_lists_keys_when_nothing_else_is_known():
+    reason = _order_error({"gamekey": "abc", "uploaded_at": "x"})
+    assert "gamekey" in reason and "uploaded_at" in reason
+
+
+class FakeOrderResponse:
+    def __init__(self, payload, status_code=200, valid_json=True):
+        self._payload = payload
+        self.status_code = status_code
+        self._valid_json = valid_json
+
+    def json(self):
+        if not self._valid_json:
+            raise ValueError("not json")
+        return self._payload
+
+
+GOOD_ORDER = {
+    "product": {"human_name": "Real Bundle"},
+    "subproducts": [],
+}
+
+
+class OrderSession:
+    def __init__(self, responses):
+        self.responses = responses
+        self.headers = {}
+        self.cookies = {}
+
+    def get(self, url, **kwargs):
+        for key, response in self.responses.items():
+            if "/order/" + key in url:
+                return response
+        raise AssertionError("unexpected url " + url)
+
+
+def _run_orders(responses):
+    dl = DownloadLibrary(
+        "fake_library_path", purchase_keys=list(responses), dry_run=True
+    )
+    dl.session = OrderSession(responses)
+    dl.cache_data = {}
+    dl.cache_file = "fake_library_path/.cache.json"
+    for order_id in dl.purchase_keys:
+        dl._process_order_id(order_id)
+    return dl
+
+
+def test_order_without_product_is_skipped_not_fatal():
+    dl = _run_orders({"bad": FakeOrderResponse({"_errors": "Unauthorized"})})
+    assert dl.skipped_orders == ["bad"]
+
+
+def test_order_that_is_not_json_is_skipped():
+    dl = _run_orders(
+        {"bad": FakeOrderResponse(None, status_code=503, valid_json=False)}
+    )
+    assert dl.skipped_orders == ["bad"]
+
+
+def test_one_bad_order_does_not_stop_the_others():
+    dl = _run_orders({
+        "bad": FakeOrderResponse({"_errors": "Unauthorized"}),
+        "good": FakeOrderResponse(GOOD_ORDER),
+    })
+    assert dl.skipped_orders == ["bad"]
+    assert dl._current_bundle == "Real Bundle"
+
+
+def test_order_without_subproducts_does_not_crash():
+    dl = _run_orders(
+        {"thin": FakeOrderResponse({"product": {"human_name": "Thin"}})}
+    )
+    assert dl.skipped_orders == []
+    assert dl._current_bundle == "Thin"

@@ -46,6 +46,21 @@ def _struct_filename(file_type):
     return file_type["url"]["web"].split("?")[0].split("/")[-1]
 
 
+def _order_error(order):
+    """Best explanation available for an order with no product data"""
+    if not isinstance(order, dict):
+        return "the api returned {kind}, not an order".format(
+            kind=type(order).__name__
+        )
+
+    for key in ("_errors", "error_code", "error", "message"):
+        if order.get(key):
+            return "the api said {detail}".format(detail=order[key])
+
+    known = ", ".join(sorted(order.keys())) or "nothing"
+    return "no product data in the response (keys: {known})".format(known=known)
+
+
 def _coerce_size(raw_size):
     """The api is not consistent about the type used for file sizes"""
     if raw_size is None:
@@ -106,6 +121,7 @@ class DownloadLibrary:
         # _record_pending_download while self.dry_run is True
         self.pending_downloads = []
         self.unexpanded_asmjs = 0
+        self.skipped_orders = []
         self._current_bundle = ""
 
         self.session = requests.Session()
@@ -142,6 +158,15 @@ class DownloadLibrary:
 
         if self.dry_run is True:
             self._log_dry_run_summary()
+
+        if self.skipped_orders:
+            logger.warning(
+                "{count} order(s) were skipped and nothing from them was "
+                "checked: {keys}".format(
+                    count=len(self.skipped_orders),
+                    keys=" ".join(self.skipped_orders),
+                )
+            )
 
     def _get_trove_download_url(self, machine_name, web_name):
         try:
@@ -305,12 +330,37 @@ class DownloadLibrary:
             return
 
         logger.debug("Order request: {order_r}".format(order_r=order_r))
-        order = order_r.json()
+
+        try:
+            order = order_r.json()
+        except ValueError:
+            self._skip_order(
+                order_id,
+                order_r,
+                "the response was not json (is the cookie still valid?)",
+            )
+            return
+
+        if not isinstance(order, dict) or "product" not in order:
+            self._skip_order(order_id, order_r, _order_error(order))
+            return
+
         bundle_title = _clean_name(order["product"]["human_name"])
         self._current_bundle = bundle_title
         logger.info("Checking bundle: " + str(bundle_title))
-        for product in order["subproducts"]:
+        for product in order.get("subproducts", []):
             self._process_product(order_id, bundle_title, product)
+
+    def _skip_order(self, order_id, order_r, reason):
+        """One unusable order must not take the whole run down with it"""
+        self.skipped_orders.append(order_id)
+        logger.error(
+            "Skipping order {order_id} (http {status_code}): {reason}".format(
+                order_id=order_id,
+                status_code=order_r.status_code,
+                reason=reason,
+            )
+        )
 
     def _rename_old_file(self, local_filename, append_str):
         # Check if older file exists, if so rename
