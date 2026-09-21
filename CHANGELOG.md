@@ -6,6 +6,11 @@
 - Added `--dry-run`/`-n` to report the number of files and total size of a download before
   downloading anything, broken down per bundle
 - Added `--print-urls` to print the url of each file being collected to stdout, one per line
+- Connection errors and 5xx responses are now retried with exponential backoff (`--retries`,
+  default 5). A `429` pauses every worker for the duration of the server's `Retry-After`, rather
+  than backing off one worker while the rest keep going, and the run reports how often it was
+  throttled
+- Requests now identify as `humblebundle-downloader/<version>` instead of `python-requests`
 - Downloads now run 4 at a time by default. `--jobs`/`-j` sets the number, `--no-parallel` goes
   back to one at a time and overrides `--jobs`. The cache write is locked, each worker gets its own
   session, and `--progress` draws the per-file bar only when sequential, reporting each file once

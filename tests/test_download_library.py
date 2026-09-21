@@ -1,3 +1,7 @@
+import time
+import email
+import datetime
+
 import json
 import threading
 
@@ -7,6 +11,8 @@ from humblebundle_downloader.download_library import (
     _file_ext,
     _human_size,
     _order_error,
+    _retry_after_seconds,
+    USER_AGENT,
 )
 
 
@@ -442,3 +448,82 @@ def test_cache_file_stays_valid_under_concurrent_writes(tmp_path):
     with open(dl.cache_file) as handle:
         written = json.load(handle)
     assert len(written) == 200
+
+
+###
+# throttle handling
+###
+class FakeHeaders(dict):
+    pass
+
+
+def _response_with(retry_after):
+    headers = {} if retry_after is None else {"Retry-After": retry_after}
+    return type("R", (), {"headers": headers})()
+
+
+def test_retry_after_seconds_reads_a_number():
+    assert _retry_after_seconds(_response_with("120")) == 120
+
+
+def test_retry_after_seconds_defaults_when_absent():
+    assert _retry_after_seconds(_response_with(None)) == 30
+
+
+def test_retry_after_seconds_defaults_when_unparseable():
+    assert _retry_after_seconds(_response_with("soon please")) == 30
+
+
+def test_retry_after_seconds_reads_an_http_date():
+    when = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
+        seconds=90
+    )
+    stamp = email.utils.format_datetime(when)
+    assert 80 <= _retry_after_seconds(_response_with(stamp)) <= 95
+
+
+def test_session_carries_a_descriptive_user_agent():
+    dl = DownloadLibrary("fake_library_path")
+    agent = dl.session.headers.get("User-Agent")
+    assert agent == USER_AGENT
+    assert "humblebundle-downloader" in agent
+
+
+def test_user_agent_is_set_even_without_retries():
+    dl = DownloadLibrary("fake_library_path", retries=0)
+    assert dl.session.headers.get("User-Agent") == USER_AGENT
+
+
+def test_retry_adapter_leaves_429_to_the_pool():
+    dl = DownloadLibrary("fake_library_path")
+    retry = dl.session.get_adapter("https://example.com/").max_retries
+    assert retry.total == 5
+    assert 503 in retry.status_forcelist
+    assert 429 not in retry.status_forcelist
+
+
+def test_cooldown_blocks_until_it_expires():
+    dl = DownloadLibrary("fake_library_path")
+    dl._enter_cooldown(0.3, "https://dl.example.com/a.bin")
+    started = time.time()
+    dl._wait_out_cooldown()
+    assert time.time() - started >= 0.25
+    assert dl._throttled_count == 1
+
+
+def test_cooldown_is_not_shortened_by_a_later_smaller_pause():
+    dl = DownloadLibrary("fake_library_path")
+    dl._enter_cooldown(30, "https://dl.example.com/a.bin")
+    first = dl._cooldown_until
+    dl._enter_cooldown(1, "https://dl.example.com/b.bin")
+    assert dl._cooldown_until == first
+    assert dl._throttled_count == 2
+
+
+def test_cooldown_wait_returns_immediately_when_stopped():
+    dl = DownloadLibrary("fake_library_path")
+    dl._enter_cooldown(30, "https://dl.example.com/a.bin")
+    dl._stop.set()
+    started = time.time()
+    dl._wait_out_cooldown()
+    assert time.time() - started < 1

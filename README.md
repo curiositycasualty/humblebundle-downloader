@@ -131,7 +131,17 @@ still download their page sequentially, because the list of data files to fetch 
 page. Dry runs stay single threaded, having nothing to download.
 
 If Humble starts refusing connections or throttling you, lower `-j` before assuming anything else
-is wrong.
+is wrong. The downloader handles throttling on its own, though:
+
+- Connection errors and 5xx responses are retried with exponential backoff at the transport layer.
+  `--retries` sets how many times (default 5, `0` to fail on the first error).
+- A `429 Too Many Requests` pauses **every** worker, not only the one that was refused, for as long
+  as the server's `Retry-After` header asks (30s when it does not say). Retrying per request would
+  just mean one worker backing off politely while the rest keep hammering.
+- The run ends by telling you how many times it was throttled, so a slow run is not a mystery.
+
+Requests identify themselves as `humblebundle-downloader/<version>` rather than the default
+`python-requests`, which tends to be treated more harshly by the machinery in front of a CDN.
 
 
 ### 6. Picking one format per item

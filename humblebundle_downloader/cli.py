@@ -76,6 +76,15 @@ def parse_args(args):
         help="Number of files to download at once (default: 4)",
     )
     parser.add_argument(
+        "--retries",
+        type=int,
+        default=5,
+        help=(
+            "How many times to retry a file the server refuses or drops "
+            "(default: 5). Use 0 to fail on the first error"
+        ),
+    )
+    parser.add_argument(
         "--no-parallel",
         action="store_true",
         help=(
@@ -153,6 +162,9 @@ def cli():
     if cli_args.jobs < 1:
         sys.exit("--jobs must be at least 1")
 
+    if cli_args.retries < 0:
+        sys.exit("--retries cannot be negative")
+
     jobs = resolve_jobs(cli_args)
 
     from .download_library import DownloadLibrary
@@ -172,4 +184,5 @@ def cli():
         dry_run=cli_args.dry_run,
         print_urls=cli_args.print_urls,
         jobs=jobs,
+        retries=cli_args.retries,
     ).start()

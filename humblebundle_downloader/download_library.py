@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import time
+import email
 import queue
 import parsel
 import logging
@@ -9,8 +10,61 @@ import datetime
 import requests
 import threading
 import http.cookiejar
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 logger = logging.getLogger(__name__)
+
+# Retried at the transport layer. 429 is deliberately absent: it is
+# handled explicitly so the whole pool backs off together
+RETRY_STATUSES = (500, 502, 503, 504)
+THROTTLE_STATUSES = (429,)
+DEFAULT_COOLDOWN = 30
+
+
+def _package_version():
+    try:
+        from importlib.metadata import version
+
+        return version("humblebundle-downloader")
+    except Exception:
+        return "dev"
+
+
+USER_AGENT = (
+    "humblebundle-downloader/{version} "
+    "(+https://github.com/xtream1101/humblebundle-downloader)"
+).format(version=_package_version())
+
+
+def _retry_after_seconds(response, default=DEFAULT_COOLDOWN):
+    """Retry-After is either a number of seconds or an http date"""
+    raw = None
+    try:
+        raw = response.headers.get("Retry-After")
+    except Exception:
+        return default
+
+    if not raw:
+        return default
+
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        pass
+
+    try:
+        when = email.utils.parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return default
+    if when is None:
+        return default
+
+    if when.tzinfo is None:
+        delta = when - datetime.datetime.now()
+    else:
+        delta = when - datetime.datetime.now(when.tzinfo)
+    return max(0, int(delta.total_seconds()))
 
 
 def _clean_name(dirty_str):
@@ -91,9 +145,11 @@ class DownloadLibrary:
         dry_run=False,
         print_urls=False,
         jobs=1,
+        retries=5,
     ):
         self.library_path = library_path
         self.jobs = max(1, int(jobs))
+        self.retries = max(0, int(retries))
         self.progress_bar = progress_bar
         # Several \r progress bars writing at once is unreadable, so in
         # parallel mode each file reports once, when it finishes
@@ -104,6 +160,14 @@ class DownloadLibrary:
         self._stop = threading.Event()
         self._cache_lock = threading.Lock()
         self._thread_local = threading.local()
+
+        # A 429 seen by any one worker pauses all of them: retrying per
+        # request just means the other workers keep hammering while one
+        # of them politely backs off
+        self._cooldown_until = 0.0
+        self._cooldown_lock = threading.Lock()
+        self._throttled_count = 0
+
         self.ext_include = (
             [] if ext_include is None else list(map(str.lower, ext_include))
         )
@@ -137,7 +201,7 @@ class DownloadLibrary:
         self.skipped_orders = []
         self._current_bundle = ""
 
-        self.session = requests.Session()
+        self.session = self._configure_session(requests.Session())
         if cookie_path:
             try:
                 cookie_jar = http.cookiejar.MozillaCookieJar(cookie_path)
@@ -185,6 +249,12 @@ class DownloadLibrary:
         if self.dry_run is True:
             self._log_dry_run_summary()
 
+        if self._throttled_count:
+            logger.warning(
+                "Throttled {count} time(s) during this run. Lower --jobs "
+                "if it keeps happening".format(count=self._throttled_count)
+            )
+
         if self.skipped_orders:
             logger.warning(
                 "{count} order(s) were skipped and nothing from them was "
@@ -193,6 +263,77 @@ class DownloadLibrary:
                     keys=" ".join(self.skipped_orders),
                 )
             )
+
+    def _configure_session(self, session):
+        """Transport level retries, plus a user agent that says who we
+        are. The default python-requests one gets treated more harshly
+        by a lot of edge configurations
+        """
+        session.headers.update({"User-Agent": USER_AGENT})
+
+        if self.retries == 0:
+            return session
+
+        retry_args = dict(
+            total=self.retries,
+            connect=self.retries,
+            read=self.retries,
+            status=self.retries,
+            backoff_factor=1,
+            status_forcelist=RETRY_STATUSES,
+            respect_retry_after_header=True,
+            raise_on_status=False,
+        )
+        try:
+            retry = Retry(allowed_methods=frozenset(["GET", "HEAD"]), **retry_args)
+        except TypeError:
+            # urllib3 < 1.26 spelled it differently
+            retry = Retry(method_whitelist=frozenset(["GET", "HEAD"]), **retry_args)
+
+        adapter = HTTPAdapter(
+            max_retries=retry,
+            pool_maxsize=max(10, self.jobs),
+        )
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        return session
+
+    def _wait_out_cooldown(self):
+        """Block until any pool wide throttle pause has expired"""
+        while not self._stop.is_set():
+            with self._cooldown_lock:
+                remaining = self._cooldown_until - time.time()
+            if remaining <= 0:
+                return
+            # Woken early if the run is interrupted
+            self._stop.wait(min(remaining, 1.0))
+
+    def _enter_cooldown(self, seconds, remote_file):
+        """Pause every worker, not just the one that got the 429"""
+        with self._cooldown_lock:
+            self._throttled_count += 1
+            now = time.time()
+            until = now + seconds
+            if until <= self._cooldown_until:
+                # Another worker already called for a longer pause
+                return
+            # Workers refused at the same moment would otherwise each
+            # announce the same pause
+            announce = self._cooldown_until <= now or (
+                until - self._cooldown_until > 1
+            )
+            self._cooldown_until = until
+
+        if not announce:
+            return
+
+        logger.warning(
+            "Throttled by the server (429) on {name}, pausing all "
+            "downloads for {seconds}s".format(
+                name=os.path.basename(remote_file.split("?")[0]),
+                seconds=seconds,
+            )
+        )
 
     def _start_workers(self):
         if self.jobs == 1 or self.dry_run is True:
@@ -253,7 +394,7 @@ class DownloadLibrary:
         return session
 
     def _new_session(self):
-        session = requests.Session()
+        session = self._configure_session(requests.Session())
         session.headers.update(self.session.headers)
         session.cookies.update(self.session.cookies)
         return session
@@ -756,14 +897,26 @@ class DownloadLibrary:
 
     def _get_remote_headers(self, remote_file):
         """Headers only, so nothing is transferred to size up a file"""
-        try:
-            head_r = self.session.head(remote_file, allow_redirects=True)
-        except Exception:
-            logger.debug(
-                "Failed to get headers for {remote_file}".format(
-                    remote_file=remote_file
+        for _ in range(self.retries + 1):
+            self._wait_out_cooldown()
+            if self._stop.is_set():
+                return None
+
+            try:
+                head_r = self._session().head(remote_file, allow_redirects=True)
+            except Exception:
+                logger.debug(
+                    "Failed to get headers for {remote_file}".format(
+                        remote_file=remote_file
+                    )
                 )
-            )
+                return None
+
+            if head_r.status_code not in THROTTLE_STATUSES:
+                break
+
+            self._enter_cooldown(_retry_after_seconds(head_r), remote_file)
+        else:
             return None
 
         if head_r.status_code != 200:
@@ -930,6 +1083,45 @@ class DownloadLibrary:
 
         return self._run_download_job(job)
 
+    def _get_with_backoff(self, remote_file, stream=True):
+        """GET that honours the pool wide cooldown and handles a 429.
+
+        Connection errors and 5xx are retried inside the session's
+        transport adapter. A 429 is handled here instead, so that every
+        worker pauses rather than only the one that was refused.
+        """
+        for _ in range(self.retries + 1):
+            self._wait_out_cooldown()
+            if self._stop.is_set():
+                return None
+
+            try:
+                response = self._session().get(remote_file, stream=stream)
+            except Exception:
+                logger.exception(
+                    "Failed to download {remote_file}".format(
+                        remote_file=remote_file
+                    )
+                )
+                return None
+
+            if response.status_code not in THROTTLE_STATUSES:
+                return response
+
+            self._enter_cooldown(_retry_after_seconds(response), remote_file)
+            try:
+                response.close()
+            except Exception:
+                pass
+
+        logger.error(
+            "Giving up on {remote_file}: still throttled after {count} "
+            "attempts".format(
+                remote_file=remote_file, count=self.retries + 1
+            )
+        )
+        return None
+
     def _run_download_job(self, job):
         cache_file_key = job["cache_file_key"]
         remote_file = job["remote_file"]
@@ -937,12 +1129,8 @@ class DownloadLibrary:
         local_filename = job["local_filename"]
         cache_file_info = job["cache_file_info"]
 
-        try:
-            remote_file_r = self._session().get(remote_file, stream=True)
-        except Exception:
-            logger.exception(
-                "Failed to download {remote_file}".format(remote_file=remote_file)
-            )
+        remote_file_r = self._get_with_backoff(remote_file)
+        if remote_file_r is None:
             return False
 
         # Check to see if the file still exists
