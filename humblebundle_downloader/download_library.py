@@ -21,6 +21,28 @@ def _clean_name(dirty_str):
     return "".join(clean).strip().rstrip(".")
 
 
+def _human_size(num_bytes):
+    """Format a byte count the way a human would read it"""
+    size = float(num_bytes)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if abs(size) < 1024 or unit == "TiB":
+            if unit == "B":
+                return "{size:.0f} {unit}".format(size=size, unit=unit)
+            return "{size:.2f} {unit}".format(size=size, unit=unit)
+        size /= 1024
+
+
+def _coerce_size(raw_size):
+    """The api is not consistent about the type used for file sizes"""
+    if raw_size is None:
+        return None
+    try:
+        size = int(raw_size)
+    except (TypeError, ValueError):
+        return None
+    return size if size >= 0 else None
+
+
 class DownloadLibrary:
     def __init__(
         self,
@@ -34,6 +56,8 @@ class DownloadLibrary:
         purchase_keys=None,
         trove=False,
         update=False,
+        dry_run=False,
+        print_urls=False,
     ):
         self.library_path = library_path
         self.progress_bar = progress_bar
@@ -52,6 +76,14 @@ class DownloadLibrary:
         self.purchase_keys = purchase_keys
         self.trove = trove
         self.update = update
+        self.dry_run = dry_run
+        self.print_urls = print_urls
+
+        # Tally of everything a real run would fetch, filled in by
+        # _record_pending_download while self.dry_run is True
+        self.pending_downloads = []
+        self.unexpanded_asmjs = 0
+        self._current_bundle = ""
 
         self.session = requests.Session()
         if cookie_path:
@@ -77,12 +109,16 @@ class DownloadLibrary:
 
         if self.trove is True:
             logger.info("Only checking the Humble Trove...")
+            self._current_bundle = "Humble Trove"
             for product in self._get_trove_products():
                 title = _clean_name(product["human-name"])
                 self._process_trove_product(title, product)
         else:
             for order_id in self.purchase_keys:
                 self._process_order_id(order_id)
+
+        if self.dry_run is True:
+            self._log_dry_run_summary()
 
     def _get_trove_download_url(self, machine_name, web_name):
         try:
@@ -145,6 +181,24 @@ class DownloadLibrary:
             if file_info["uploaded_at"] != cache_file_info.get(
                 "uploaded_at"
             ) and file_info["md5"] != cache_file_info.get("md5"):
+                if self.dry_run is True:
+                    # The trove api hands us the size up front, so only pay
+                    # for the signing request when the url is being printed
+                    signed_url = None
+                    if self.print_urls is True:
+                        signed_url = self._get_trove_download_url(
+                            download["machine_name"],
+                            web_name,
+                        )
+                    self._record_pending_download(
+                        signed_url,
+                        os.path.join("Humble Trove", title, web_name),
+                        _coerce_size(
+                            download.get("file_size") or download.get("size")
+                        ),
+                    )
+                    continue
+
                 product_folder = os.path.join(self.library_path, "Humble Trove", title)
                 # Create directory to save the files to
                 try:
@@ -230,6 +284,7 @@ class DownloadLibrary:
         logger.debug("Order request: {order_r}".format(order_r=order_r))
         order = order_r.json()
         bundle_title = _clean_name(order["product"]["human_name"])
+        self._current_bundle = bundle_title
         logger.info("Checking bundle: " + str(bundle_title))
         for product in order["subproducts"]:
             self._process_product(order_id, bundle_title, product)
@@ -260,10 +315,11 @@ class DownloadLibrary:
                 self.library_path, bundle_title, product_title
             )
             # Create directory to save the files to
-            try:
-                os.makedirs(product_folder)
-            except OSError:
-                pass
+            if self.dry_run is False:
+                try:
+                    os.makedirs(product_folder)
+                except OSError:
+                    pass
 
             # Download each file type of a product
             for file_type in download_type["download_struct"]:
@@ -283,7 +339,11 @@ class DownloadLibrary:
                         cache_file_key = order_id + ":" + url_filename
                         try:
                             self._check_cache_and_download(
-                                cache_file_key, url, product_folder, url_filename
+                                cache_file_key,
+                                url,
+                                product_folder,
+                                url_filename,
+                                file_size=_coerce_size(file_type.get("file_size")),
                             )
                         except FileExistsError:
                             continue
@@ -294,10 +354,11 @@ class DownloadLibrary:
                         game_name = file_type["asm_config"]["display_item"]
                         local_folder = os.path.join(product_folder, game_name)
                         # Create directory to save the files to
-                        try:
-                            os.makedirs(local_folder, exist_ok=True)  # noqa: E701
-                        except OSError:
-                            pass  # noqa: E701
+                        if self.dry_run is False:
+                            try:
+                                os.makedirs(local_folder, exist_ok=True)  # noqa: E701
+                            except OSError:
+                                pass  # noqa: E701
 
                         # get the HTML file that presents the game, used in the Humble web interface iframe
                         asmjs_html_filename = game_name + ".html"
@@ -320,6 +381,28 @@ class DownloadLibrary:
                             )
                             is False
                         ):
+                            continue
+
+                        if self.dry_run is True:
+                            # The data files this game needs are listed
+                            # inside the html page, which a dry run does
+                            # not fetch, so only the page itself is sized
+                            try:
+                                self._check_cache_and_download(
+                                    cache_file_key,
+                                    asmjs_url,
+                                    local_folder,
+                                    asmjs_html_filename,
+                                )
+                            except FileExistsError:
+                                pass
+                            except Exception:
+                                logger.exception(
+                                    "Failed to check {asmjs_url}".format(
+                                        asmjs_url=asmjs_url
+                                    )
+                                )
+                            self.unexpanded_asmjs += 1
                             continue
 
                         downloaded = False
@@ -429,6 +512,132 @@ class DownloadLibrary:
                     )
                     continue
 
+    def _log_url(self, url):
+        if self.print_urls is True and url:
+            # Straight to stdout, one per line, so the list stays usable
+            # when piped into another tool. All logging goes to stderr
+            print(url)
+
+    def _get_remote_headers(self, remote_file):
+        """Headers only, so nothing is transferred to size up a file"""
+        try:
+            head_r = self.session.head(remote_file, allow_redirects=True)
+        except Exception:
+            logger.debug(
+                "Failed to get headers for {remote_file}".format(
+                    remote_file=remote_file
+                )
+            )
+            return None
+
+        if head_r.status_code != 200:
+            logger.debug(
+                "File unavailable {remote_file} status code {status_code}".format(
+                    remote_file=remote_file, status_code=head_r.status_code
+                )
+            )
+            return None
+
+        return head_r.headers
+
+    def _check_pending_download(
+        self, remote_file, local_file, file_size, cache_file_info
+    ):
+        """Work out if a real run would download this file, and how big
+        it is, without fetching any of its content
+        """
+        cached_modified = cache_file_info.get("url_last_modified")
+        headers = None
+        if file_size is None or cached_modified is not None:
+            headers = self._get_remote_headers(remote_file)
+
+        if headers is not None:
+            if (
+                cached_modified is not None
+                and headers.get("Last-Modified") == cached_modified
+            ):
+                # Unchanged since the last run, a real run would skip it
+                return
+
+            if file_size is None:
+                file_size = _coerce_size(headers.get("Content-Length"))
+
+        self._record_pending_download(remote_file, local_file, file_size)
+
+    def _record_pending_download(self, remote_file, local_file, file_size):
+        self.pending_downloads.append(
+            {
+                "bundle": self._current_bundle,
+                "local_file": local_file,
+                "url": remote_file,
+                "file_size": file_size,
+            }
+        )
+        if file_size is None:
+            logger.info(
+                "Would download: {local_file} (size unknown)".format(
+                    local_file=local_file
+                )
+            )
+        else:
+            logger.info(
+                "Would download: {local_file} ({size})".format(
+                    local_file=local_file, size=_human_size(file_size)
+                )
+            )
+        self._log_url(remote_file)
+
+    def _log_dry_run_summary(self):
+        bundles = {}
+        total_size = 0
+        unknown_count = 0
+        for pending in self.pending_downloads:
+            bundle_size, bundle_files = bundles.get(pending["bundle"], (0, 0))
+            file_size = pending["file_size"]
+            if file_size is None:
+                unknown_count += 1
+                file_size = 0
+            total_size += file_size
+            bundles[pending["bundle"]] = (
+                bundle_size + file_size,
+                bundle_files + 1,
+            )
+
+        logger.info("\n" + ("=" * 60))
+        logger.info("Dry run: nothing was downloaded")
+        logger.info("=" * 60)
+
+        for bundle, (bundle_size, bundle_files) in sorted(
+            bundles.items(), key=lambda item: item[1][0], reverse=True
+        ):
+            logger.info(
+                "{size:>10}  {files:>4} file(s)  {bundle}".format(
+                    size=_human_size(bundle_size),
+                    files=bundle_files,
+                    bundle=bundle or "Unknown bundle",
+                )
+            )
+
+        logger.info("-" * 60)
+        logger.info(
+            "{files} file(s) to download, {size} ({raw:,} bytes)".format(
+                files=len(self.pending_downloads),
+                size=_human_size(total_size),
+                raw=total_size,
+            )
+        )
+        if unknown_count > 0:
+            logger.info(
+                "{count} of those file(s) did not report a size, so the "
+                "real total will be larger".format(count=unknown_count)
+            )
+        if self.unexpanded_asmjs > 0:
+            logger.info(
+                "{count} asm.js game(s) were not sized: their data files "
+                "are only listed inside the game page, which a dry run "
+                "does not download".format(count=self.unexpanded_asmjs)
+            )
+
     def _update_cache_data(self, cache_file_key, file_info):
         self.cache_data[cache_file_key] = file_info
         # Update cache file with newest data so if the script
@@ -444,13 +653,27 @@ class DownloadLibrary:
             )
 
     def _check_cache_and_download(
-        self, cache_file_key, remote_file, local_folder, local_filename
+        self,
+        cache_file_key,
+        remote_file,
+        local_folder,
+        local_filename,
+        file_size=None,
     ):
         cache_file_info = self.cache_data.get(cache_file_key, {})
 
         if cache_file_info != {} and self.update is not True:
             # Do not care about checking for updates at this time
             raise FileExistsError
+
+        if self.dry_run is True:
+            self._check_pending_download(
+                remote_file,
+                os.path.join(local_folder, local_filename),
+                file_size,
+                cache_file_info,
+            )
+            return False
 
         try:
             remote_file_r = self.session.get(remote_file, stream=True)
@@ -494,6 +717,8 @@ class DownloadLibrary:
             os.makedirs(os.path.dirname(local_file), exist_ok=True)  # noqa: E701
         except OSError:
             raise  # noqa: E701
+
+        self._log_url(remote_file)
 
         return self._process_download(
             remote_file_r,

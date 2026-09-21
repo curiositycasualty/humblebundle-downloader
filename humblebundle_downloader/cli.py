@@ -68,6 +68,23 @@ def parse_args(args):
         action="store_true",
         help="Display progress bar for downloads",
     )
+    parser.add_argument(
+        "-n",
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Do not download anything. List what would be downloaded "
+            "and report the total size first"
+        ),
+    )
+    parser.add_argument(
+        "--print-urls",
+        action="store_true",
+        help=(
+            "Print the url of each file being collected to stdout, "
+            "one per line (all other output goes to stderr)"
+        ),
+    )
     filter_ext = parser.add_mutually_exclusive_group()
     filter_ext.add_argument(
         "-e",
@@ -113,4 +130,6 @@ def cli():
         purchase_keys=cli_args.keys,
         trove=cli_args.trove,
         update=cli_args.update,
+        dry_run=cli_args.dry_run,
+        print_urls=cli_args.print_urls,
     ).start()

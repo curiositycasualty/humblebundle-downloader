@@ -1,6 +1,15 @@
 # Change log
 
 
+## Unreleased
+
+- Added `--dry-run`/`-n` to report the number of files and total size of a download before
+  downloading anything, broken down per bundle
+- Added `--print-urls` to print the url of each file being collected to stdout, one per line
+- Fixed the test suite calling `_should_download_file_type`, which was renamed to
+  `_should_download_ext`
+
+
 ## 0.4.3
 
 - Added support for asm games ([#75](https://github.com/xtream1101/humblebundle-downloader/pull/75))

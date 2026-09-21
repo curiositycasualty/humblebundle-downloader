@@ -16,6 +16,8 @@ After that it will only download the content that has been updated or is missing
 - cli command for easy use (downloading will also work on a headless system)
 - works for SSO and 2FA accounts
 - optional progress bar for each item downloaded _(`--progress` flag)_
+- optional dry run that reports how much there is to download before downloading any of it _(`--dry-run` flag)_
+- optional listing of the url of every file being collected _(`--print-urls` flag)_
 - optional filter by file types using an include _or_ exclude list _(`--include/--exclude` flag)_
 - optional filter by platform types like video, ebook, etc... _(`--platform` flag)_
 
@@ -61,6 +63,45 @@ _If using the docker image, exclude the `hbd` part of the command_
 
 This directory structure will be used:  
 `Downloaded Library/Purchase Name/Item Name/downloaded_file.ext`
+
+
+### 3. Checking the size before downloading
+
+Add `--dry-run` (or `-n`) to see what a run would fetch without fetching any of it:  
+`hbd --cookie-file cookies.txt --library-path "Downloaded Library" --dry-run`
+
+Nothing is written to disk, no directories are created and the `.cache.json` file is left alone.
+Each pending file is listed with its size, followed by a per-bundle breakdown and a grand total:
+
+```
+============================================================
+Dry run: nothing was downloaded
+============================================================
+  3.40 GiB     2 file(s)  Game Bundle
+ 15.00 MiB     2 file(s)  Book Bundle - Sci-Fi
+------------------------------------------------------------
+4 file(s) to download, 3.41 GiB (3,663,212,288 bytes)
+```
+
+The estimate honours every other flag, so `-n` combined with `--include`, `--platform`, `--keys`,
+`--trove` or `--update` tells you the size of exactly that subset.
+Sizes come from the Humble Bundle api itself, so this costs no bandwidth beyond the api calls a real
+run already makes. For the few files the api does not report a size for, a `HEAD` request is used
+instead, and anything that still comes back without a size is counted separately at the end of the
+summary.
+
+
+### 4. Listing the download urls
+
+Add `--print-urls` to print the url of each file being collected, one per line.
+The urls go to stdout while all other output goes to stderr, so the list can be piped straight into
+another tool:
+
+`hbd --cookie-file cookies.txt --library-path "Downloaded Library" --dry-run --print-urls > urls.txt`
+
+This works during a real download too, in which case it lists each file as it is fetched.
+Note that Humble Bundle urls are signed and expire after a while, so a saved list is only good for
+a short time.
 
 
 ## Notes
