@@ -1,6 +1,10 @@
 import os
 
 import queue
+from humblebundle_downloader.progress_styles import (
+    PROGRESS_STYLES,
+    DEFAULT_PROGRESS_STYLE,
+)
 import signal
 import logging
 
@@ -24,6 +28,7 @@ from humblebundle_downloader.download_library import (
     _human_size,
     _content_range_total,
     _order_error,
+    _muncher_bar,
     _retry_after_seconds,
     USER_AGENT,
 )
@@ -674,69 +679,116 @@ class FakeTTY(io.StringIO):
         return True
 
 
-def _reporter(tty=True):
-    return ProgressReporter(stream=FakeTTY() if tty else io.StringIO())
+def _reporter(slots=2, tty=True, style="fish"):
+    return ProgressReporter(
+        stream=FakeTTY() if tty else io.StringIO(), slots=slots, style=style
+    )
 
 
-def test_reporter_counts_and_percentages():
+def test_block_has_a_line_per_slot_plus_totals():
+    reporter = _reporter(slots=3)
+    lines = reporter.render(100, 24)
+    assert len(lines) == 4
+    assert lines[-1].startswith("Total")
+
+
+def test_active_transfer_shows_name_and_percentage():
     reporter = _reporter()
     reporter.file_started("one.cbz", 1000)
     reporter.file_progress("one.cbz", 620)
-    frame = reporter.render(100)
-    assert "1 active" in frame
-    assert "one.cbz 62%" in frame
+    block = "\n".join(reporter.render(100, 24))
+    assert "one.cbz" in block
+    assert "62%" in block
 
 
-def test_reporter_counts_finished_files_and_their_bytes():
-    reporter = _reporter()
+def test_finished_transfer_frees_its_slot():
+    reporter = _reporter(slots=2)
     reporter.file_started("one.cbz", 1000)
     reporter.file_progress("one.cbz", 1000)
     reporter.file_finished("one.cbz")
-    frame = reporter.render(100)
-    assert "1 done" in frame
-    assert "0 active" in frame
+    block = "\n".join(reporter.render(100, 24))
+    assert "one.cbz" not in block
+    assert "Total 1/" in block
     assert reporter._bytes == 1000
 
 
-def test_reporter_reports_failures_separately():
+def test_slots_are_stable_as_transfers_come_and_go():
+    reporter = _reporter(slots=2)
+    reporter.file_started("first.cbz", 10)
+    reporter.file_started("second.cbz", 10)
+    assert reporter._slot_names == ["first.cbz", "second.cbz"]
+    reporter.file_finished("first.cbz")
+    assert reporter._slot_names == [None, "second.cbz"]
+    reporter.file_started("third.cbz", 10)
+    # Takes the free slot rather than shuffling the other line about
+    assert reporter._slot_names == ["third.cbz", "second.cbz"]
+
+
+def test_totals_show_a_bar_once_the_walk_is_done():
+    reporter = _reporter()
+    for _ in range(4):
+        reporter.file_queued()
+    reporter.file_started("one.cbz", 10)
+    reporter.file_finished("one.cbz")
+
+    assert "so far" in reporter.render(100, 24)[-1]
+    reporter.traversal_finished()
+    totals = reporter.render(100, 24)[-1]
+    assert "so far" not in totals
+    assert "Total 1/4" in totals
+    assert "25%" in totals
+
+
+def test_skipped_files_come_off_the_denominator():
+    reporter = _reporter()
+    for _ in range(5):
+        reporter.file_queued()
+    reporter.file_skipped()
+    reporter.file_skipped()
+    reporter.traversal_finished()
+    assert "Total 0/3" in reporter.render(100, 24)[-1]
+
+
+def test_totals_report_failures():
     reporter = _reporter()
     reporter.file_started("bad.bin", 10)
     reporter.file_finished("bad.bin", ok=False)
-    frame = reporter.render(100)
-    assert "1 failed" in frame
+    assert "1 failed" in reporter.render(100, 24)[-1]
     assert reporter._bytes == 0
 
 
-def test_reporter_handles_an_unknown_size():
+def test_unknown_size_gets_a_pacing_muncher_and_no_percentage():
     reporter = _reporter()
     reporter.file_started("mystery.bin", None)
     reporter.file_progress("mystery.bin", 2048)
-    frame = reporter.render(100)
-    assert "mystery.bin 2.00 KiB" in frame
-    assert "%" not in frame
+    line = reporter.render(100, 24)[0]
+    assert "mystery.bin" in line
+    assert "2.00 KiB" in line
+    assert "%" not in line
 
 
-def test_reporter_stays_within_the_terminal_width():
-    reporter = _reporter()
-    for i in range(12):
-        name = "quite-a-long-name-{0}.cbz".format(i)
+def test_narrow_terminal_falls_back_to_one_line():
+    reporter = _reporter(slots=4)
+    lines = reporter.render(30, 24)
+    assert len(lines) == 1
+    assert "done" in lines[0]
+    assert len(lines[0]) <= 29
+
+
+def test_short_terminal_falls_back_to_one_line():
+    reporter = _reporter(slots=8)
+    assert len(reporter.render(100, 6)) == 1
+
+
+def test_lines_are_never_wider_than_the_terminal():
+    reporter = _reporter(slots=3)
+    for i in range(3):
+        name = "a-really-quite-long-file-name-{0}.cbz".format(i)
         reporter.file_started(name, 1000)
         reporter.file_progress(name, 500)
-    for width in (30, 60, 100):
-        assert len(reporter.render(width)) <= width - 1
-
-
-def test_reporter_renders_a_single_line():
-    reporter = _reporter()
-    reporter.file_started("one.cbz", 1000)
-    assert "\n" not in reporter.render(100)
-    assert "\r" not in reporter.render(100)
-
-
-def test_reporter_progress_for_an_unknown_file_is_ignored():
-    reporter = _reporter()
-    reporter.file_progress("never-started.bin", 500)
-    assert "never-started" not in reporter.render(100)
+    for width in (60, 80, 120):
+        for line in reporter.render(width, 24):
+            assert len(line) <= width, (width, len(line), line)
 
 
 def test_reporter_is_disabled_off_a_terminal():
@@ -748,21 +800,85 @@ def test_reporter_is_disabled_off_a_terminal():
     assert reporter.stream.getvalue() == ""
 
 
-def test_reporter_writes_and_then_wipes_the_line():
-    reporter = _reporter()
+def test_paint_then_clear_wipes_the_block():
+    reporter = _reporter(slots=2)
     reporter.file_started("one.cbz", 1000)
     reporter.paint()
+    assert reporter._painted == 3
     assert reporter.stream.getvalue() != ""
     reporter.clear()
-    assert reporter.stream.getvalue().endswith("\033[K")
+    assert reporter._painted == 0
+    assert reporter.stream.getvalue().endswith("\033[3A")
 
 
-def test_reporter_only_used_for_parallel_runs_with_progress():
+def test_repaint_moves_back_over_the_previous_block():
+    reporter = _reporter(slots=2)
+    reporter.paint()
+    reporter.stream.truncate(0)
+    reporter.stream.seek(0)
+    reporter.paint()
+    assert reporter.stream.getvalue().startswith("\033[3A")
+
+
+def test_only_used_for_parallel_runs_with_progress():
     assert DownloadLibrary("x", jobs=1, progress_bar=True)._progress is None
     assert DownloadLibrary("x", jobs=4, progress_bar=False)._progress is None
     parallel = DownloadLibrary("x", jobs=4, progress_bar=True)
     assert parallel._progress is not None
+    assert parallel._progress.slots == 4
     assert parallel._show_bar is False
+
+
+###
+# _muncher_bar
+###
+def test_muncher_starts_at_the_left_and_ends_at_the_right():
+    style = PROGRESS_STYLES["bars"]
+    assert _muncher_bar(0.0, 10, style, 0) == "[#---------]"
+    assert _muncher_bar(1.0, 10, style, 0) == "[##########]"
+
+
+def test_muncher_leaves_a_wake_and_eats_the_pellets_ahead():
+    line = _muncher_bar(0.5, 12, PROGRESS_STYLES["fish"], 0)
+    assert line.startswith("[~")
+    assert line.endswith("\u00b7]")
+    assert "><>" in line
+
+
+def test_muncher_animates_between_frames():
+    style = PROGRESS_STYLES["fish"]
+    first = _muncher_bar(0.5, 20, style, 0)
+    second = _muncher_bar(0.5, 20, style, 1)
+    assert first != second, "the muncher never chomps"
+    assert len(first) == len(second), "chomping changes the bar width"
+
+
+def test_every_style_keeps_a_constant_width():
+    for name, style in PROGRESS_STYLES.items():
+        widths = {
+            len(_muncher_bar(0.5, 20, style, frame))
+            for frame in range(len(style["muncher"]) * 2)
+        }
+        assert widths == {22}, (name, widths)
+
+
+def test_muncher_paces_when_the_size_is_unknown():
+    style = PROGRESS_STYLES["fish"]
+    seen = {_muncher_bar(None, 16, style, frame) for frame in range(12)}
+    assert len(seen) > 2, "an unknown size should still look alive"
+    for line in seen:
+        assert len(line) == 18
+
+
+def test_muncher_copes_with_a_tiny_bar():
+    for width in range(0, 6):
+        line = _muncher_bar(0.5, width, PROGRESS_STYLES["fish"], 0)
+        assert line.startswith("[") and line.endswith("]")
+
+
+def test_unknown_style_name_falls_back_to_the_default():
+    reporter = ProgressReporter(stream=io.StringIO(), style="no-such-style")
+    assert reporter.style is PROGRESS_STYLES[DEFAULT_PROGRESS_STYLE]
 
 
 ###

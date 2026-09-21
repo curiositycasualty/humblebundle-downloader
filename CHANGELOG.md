@@ -11,10 +11,13 @@
   `130`; the second press quits immediately whatever state things are in. A transfer wedged
   somewhere uninterruptible is given ten seconds before the run leaves without it. Interrupted runs
   previously exited `0`, and a Ctrl+C arriving while waiting on downloads escaped as a traceback
-- `--progress` now shows a live status line during parallel downloads: files finished, transfers in
-  flight with each one's percentage, total fetched and current throughput, truncated to the
-  terminal width. One reporter thread owns the line, so concurrent transfers cannot shred each
-  other's output, and nothing is drawn when output is not a terminal
+- `--progress` now gives each parallel transfer its own line, repainted in place, with a muncher
+  animating along the bar, plus a totals line underneath. One reporter thread owns the block, so
+  concurrent transfers cannot shred each other's output; slots are stable so finished transfers do
+  not make the other rows jump; and nothing is drawn when output is not a terminal, or when the
+  terminal is too small for the block, which falls back to a single summary line
+- Added `--progress-style` to pick the muncher: `fish`, `snail`, `bars` or `blocks`. They live in
+  the new `progress_styles` module, a plain dict with no imports, so adding your own is easy
 - Interrupted transfers now resume with an http `Range` request instead of starting over. Support
   is detected rather than assumed: a `206` appends to what was already fetched, a `200` means the
   server ignored the request and the file restarts. Content is written to `<file>.part` and moved

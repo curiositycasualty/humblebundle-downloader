@@ -3,6 +3,8 @@ import sys
 import logging
 import argparse
 
+from .progress_styles import PROGRESS_STYLES, DEFAULT_PROGRESS_STYLE
+
 logger = logging.getLogger(__name__)
 
 LOG_LEVEL = os.environ.get("HBD_LOGLEVEL", "INFO").upper()
@@ -67,6 +69,18 @@ def parse_args(args):
         "--progress",
         action="store_true",
         help="Display progress bar for downloads",
+    )
+    parser.add_argument(
+        "--progress-style",
+        type=str,
+        default=DEFAULT_PROGRESS_STYLE,
+        choices=sorted(PROGRESS_STYLES),
+        help=(
+            "Look of the per-file progress bar when downloading in "
+            "parallel (default: {default})".format(
+                default=DEFAULT_PROGRESS_STYLE
+            )
+        ),
     )
     parser.add_argument(
         "-j",
@@ -183,6 +197,7 @@ def cli():
         update=cli_args.update,
         dry_run=cli_args.dry_run,
         print_urls=cli_args.print_urls,
+        progress_style=cli_args.progress_style,
         jobs=jobs,
         retries=cli_args.retries,
     ).start()

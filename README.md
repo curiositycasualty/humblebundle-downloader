@@ -115,29 +115,40 @@ Four files download at once by default. Change the number with `--jobs`/`-j`:
 `--no-parallel` goes back to one file at a time, and overrides `--jobs`, so it still works when
 `-j` is baked into a shell alias.
 
-Because several `\r` progress bars writing at once is unreadable, `--progress` shows one status
-line for the whole pool instead of a bar per file. A single reporter thread owns that line, so
-concurrent transfers cannot shred each other's output:
+`--progress` gives each transfer in flight its own line, repainted in place, with a totals line
+underneath. One reporter thread owns the whole block, so concurrent transfers cannot shred each
+other's output:
 
 ```
-12 done · 4 active · 1.42 GiB · 11.3 MiB/s  one.cbz 62%  two.cbz 25%  three.pdf 9%  four.epub 81%
+Monstress Volume 1.cbz              1.00 MiB 964.52 KiB/s 00:03 [~~~~~~~~~><>········]  51%
+Descender Volume 2.cbz              1.13 MiB 968.39 KiB/s 00:06 [~~~~~~><>···········]  34%
+Black Hammer Omnibus.pdf            1.25 MiB 956.79 KiB/s 00:09 [~~~~><>·············]  20%
+Saga Volume 5.cbz                 898.44 KiB 957.58 KiB/s 00:01 [~~~~~~~~~~~~><>·····]  72%
+Total 4/9                           4.06 MiB   3.74 MiB/s 00:11 [#########-----------]  44%
 ```
 
-It carries how many files are finished, how many are in flight with each one's percentage, the
-total fetched so far and the current throughput, and it is truncated to your terminal width. Files
-that report no size show bytes fetched rather than a percentage, and failures are counted
-separately once any have happened.
+Each line carries the file, its size, current speed, ETA and a muncher eating its way along the
+bar, chomping as it goes. A file whose size the api does not report gets a muncher pacing back and
+forth instead of a percentage. Slots are stable, so a finished transfer leaves its row empty for
+the next one rather than making the other lines jump about. The totals line counts files rather
+than bytes, and only grows a bar once everything has been queued and the denominator is final.
 
-Each file also announces itself as it lands, on its own line above the status line:
+`--progress-style` picks the muncher: `fish` (the default), `snail`, `bars` or `blocks`. They live
+in `progress_styles.py`, which is a plain dict with no imports, so adding your own is a two line
+change — the only rule is that every frame of a style has to be the same width, or the bar jitters
+as it animates.
+
+Each file also announces itself as it lands, on its own line above the block:
 
 ```
 Downloaded Some Comic Vol1.cbz (24.10 MiB in 3.4s)
 Downloaded Another Book.epub (8.40 MiB in 1.1s)
 ```
 
-Running sequentially (`--no-parallel`) keeps the original per-file bar. The status line is only
-drawn to a terminal: piped or redirected output gets the completion lines alone, with no carriage
-returns to clean up afterwards.
+Running sequentially (`--no-parallel`) keeps the original per-file bar. The block is only drawn to
+a terminal: piped or redirected output gets the completion lines alone, with no escape sequences to
+clean up afterwards. A terminal too narrow or too short for the block falls back to a single
+summary line automatically.
 
 
 ### Stopping a run
