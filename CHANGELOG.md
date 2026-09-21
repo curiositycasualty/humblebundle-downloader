@@ -6,6 +6,11 @@
 - Added `--dry-run`/`-n` to report the number of files and total size of a download before
   downloading anything, broken down per bundle
 - Added `--print-urls` to print the url of each file being collected to stdout, one per line
+- Interrupted transfers now resume with an http `Range` request instead of starting over. Support
+  is detected rather than assumed: a `206` appends to what was already fetched, a `200` means the
+  server ignored the request and the file restarts. Content is written to `<file>.part` and moved
+  into place only once complete, so a partial transfer can never be mistaken for a finished file
+  and an existing copy survives a failed re-download
 - Connection errors and 5xx responses are now retried with exponential backoff (`--retries`,
   default 5). A `429` pauses every worker for the duration of the server's `Retry-After`, rather
   than backing off one worker while the rest keep going, and the run reports how often it was

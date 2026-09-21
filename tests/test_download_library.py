@@ -1,3 +1,5 @@
+import pytest
+
 import time
 import email
 import datetime
@@ -10,6 +12,7 @@ from humblebundle_downloader.download_library import (
     _coerce_size,
     _file_ext,
     _human_size,
+    _content_range_total,
     _order_error,
     _retry_after_seconds,
     USER_AGENT,
@@ -527,3 +530,127 @@ def test_cooldown_wait_returns_immediately_when_stopped():
     started = time.time()
     dl._wait_out_cooldown()
     assert time.time() - started < 1
+
+
+###
+# range resume
+###
+def test_content_range_total():
+    assert _content_range_total(_range_response("bytes 100-999/1000")) == 1000
+    assert _content_range_total(_range_response("bytes */1000")) == 1000
+    assert _content_range_total(_range_response(None)) is None
+    assert _content_range_total(_range_response("bytes 0-1/unknown")) is None
+
+
+def _range_response(content_range, status_code=206, length=None):
+    headers = {}
+    if content_range is not None:
+        headers["Content-Range"] = content_range
+    if length is not None:
+        headers["Content-Length"] = str(length)
+    return type(
+        "R", (), {"headers": headers, "status_code": status_code}
+    )()
+
+
+def _library_with_response(response, second=None):
+    dl = DownloadLibrary("fake_library_path")
+    handed = []
+
+    def fake_get(remote_file, stream=True, range_start=None):
+        handed.append(range_start)
+        if len(handed) == 1:
+            return response
+        return second
+
+    dl._get_with_backoff = fake_get
+    dl._handed = handed
+    return dl
+
+
+def test_resume_appends_when_server_answers_206():
+    response = _range_response("bytes 500-999/1000", 206, length=500)
+    dl = _library_with_response(response)
+    got, append, total = dl._reopen_for_resume("https://x/y.bin", "y.part", 500)
+    assert got is response
+    assert append is True
+    assert total == 1000
+    assert dl._handed == [500]
+
+
+def test_resume_derives_total_without_content_range():
+    response = _range_response(None, 206, length=400)
+    dl = _library_with_response(response)
+    _, append, total = dl._reopen_for_resume("https://x/y.bin", "y.part", 600)
+    assert append is True
+    assert total == 1000
+
+
+def test_resume_restarts_when_server_ignores_range():
+    response = _range_response(None, 200, length=1000)
+    dl = _library_with_response(response)
+    got, append, total = dl._reopen_for_resume("https://x/y.bin", "y.part", 500)
+    assert got is response
+    assert append is False
+    assert total == 1000
+    assert dl._range_unsupported is True
+
+
+def test_resume_takes_file_from_the_top_on_416(tmp_path):
+    part = tmp_path / "y.part"
+    part.write_bytes(b"stale")
+    fresh = _range_response(None, 200, length=1000)
+    dl = _library_with_response(_range_response(None, 416), second=fresh)
+    got, append, total = dl._reopen_for_resume(
+        "https://x/y.bin", str(part), 500
+    )
+    assert got is fresh
+    assert append is False
+    assert not part.exists(), "stale part should have been discarded"
+
+
+def test_resume_gives_up_on_an_unexpected_status():
+    dl = _library_with_response(_range_response(None, 404))
+    assert dl._reopen_for_resume("https://x/y.bin", "y.part", 500) is None
+
+
+def test_resume_gives_up_when_the_request_fails():
+    dl = _library_with_response(None)
+    assert dl._reopen_for_resume("https://x/y.bin", "y.part", 500) is None
+
+
+class ChunkedResponse:
+    def __init__(self, body, headers=None):
+        self.headers = headers or {}
+        self.status_code = 200
+        self._body = body
+
+    def iter_content(self, chunk_size=4096):
+        for i in range(0, len(self._body), chunk_size):
+            yield self._body[i:i + chunk_size]
+
+
+def test_stream_to_file_appends_to_what_is_already_there(tmp_path):
+    part = tmp_path / "f.part"
+    part.write_bytes(b"first half ")
+    dl = DownloadLibrary("fake_library_path")
+    written = dl._stream_to_file(
+        ChunkedResponse(b"second half"), str(part), True, 11, 22
+    )
+    assert written == 22
+    assert part.read_bytes() == b"first half second half"
+
+
+def test_stream_to_file_truncates_when_not_appending(tmp_path):
+    part = tmp_path / "f.part"
+    part.write_bytes(b"leftovers from before")
+    dl = DownloadLibrary("fake_library_path")
+    dl._stream_to_file(ChunkedResponse(b"fresh"), str(part), False, 0, 5)
+    assert part.read_bytes() == b"fresh"
+
+
+def test_stream_to_file_rejects_a_short_transfer(tmp_path):
+    part = tmp_path / "f.part"
+    dl = DownloadLibrary("fake_library_path")
+    with pytest.raises(ValueError):
+        dl._stream_to_file(ChunkedResponse(b"only 6"), str(part), False, 0, 99)

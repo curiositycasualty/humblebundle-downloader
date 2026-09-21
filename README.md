@@ -143,6 +143,18 @@ is wrong. The downloader handles throttling on its own, though:
 Requests identify themselves as `humblebundle-downloader/<version>` rather than the default
 `python-requests`, which tends to be treated more harshly by the machinery in front of a CDN.
 
+Transfers that break partway through are picked back up rather than started again. Content is
+written to `<file>.part` and only moved into place once it is whole, so an interrupted download is
+never mistaken for a finished one, and a previously downloaded copy is left untouched until the new
+one is complete.
+
+Whether a transfer can actually resume is the server's call, not an assumption: the downloader asks
+with a `Range` header and believes the reply. `206 Partial Content` means it appends to what it
+already has; `200` means the server ignored the request, so the file starts again from nothing and
+that is noted once in the log. Either way the file you end up with is correct. Runs of
+`--retries` apply here too, so a large file that keeps dropping is retried rather than abandoned on
+the first stumble.
+
 
 ### 6. Picking one format per item
 

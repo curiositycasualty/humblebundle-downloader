@@ -37,6 +37,31 @@ USER_AGENT = (
 ).format(version=_package_version())
 
 
+def _file_size(path):
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
+def _remove_quietly(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def _content_range_total(response):
+    """Total size out of a `Content-Range: bytes 100-999/1000` header"""
+    try:
+        raw = response.headers.get("Content-Range")
+    except Exception:
+        return None
+    if not raw or "/" not in raw:
+        return None
+    return _coerce_size(raw.rsplit("/", 1)[-1].strip())
+
+
 def _retry_after_seconds(response, default=DEFAULT_COOLDOWN):
     """Retry-After is either a number of seconds or an http date"""
     raw = None
@@ -167,6 +192,9 @@ class DownloadLibrary:
         self._cooldown_until = 0.0
         self._cooldown_lock = threading.Lock()
         self._throttled_count = 0
+
+        self._notice_lock = threading.Lock()
+        self._range_unsupported = False
 
         self.ext_include = (
             [] if ext_include is None else list(map(str.lower, ext_include))
@@ -517,6 +545,7 @@ class DownloadLibrary:
                     file_info,
                     local_filename,
                     rename_str=uploaded_at,
+                    remote_file=signed_url,
                 )
 
     def _get_trove_products(self):
@@ -1083,20 +1112,29 @@ class DownloadLibrary:
 
         return self._run_download_job(job)
 
-    def _get_with_backoff(self, remote_file, stream=True):
+    def _get_with_backoff(self, remote_file, stream=True, range_start=None):
         """GET that honours the pool wide cooldown and handles a 429.
 
         Connection errors and 5xx are retried inside the session's
         transport adapter. A 429 is handled here instead, so that every
         worker pauses rather than only the one that was refused.
+
+        range_start asks the server to resume from that byte. Whether it
+        agrees is its business: the caller checks the status code.
         """
+        headers = None
+        if range_start:
+            headers = {"Range": "bytes={start}-".format(start=range_start)}
+
         for _ in range(self.retries + 1):
             self._wait_out_cooldown()
             if self._stop.is_set():
                 return None
 
             try:
-                response = self._session().get(remote_file, stream=stream)
+                response = self._session().get(
+                    remote_file, stream=stream, headers=headers
+                )
             except Exception:
                 logger.exception(
                     "Failed to download {remote_file}".format(
@@ -1176,17 +1214,32 @@ class DownloadLibrary:
             file_info,
             local_file,
             rename_str=last_modified,
+            remote_file=remote_file,
         )
 
     def _process_download(
-        self, open_r, cache_file_key, file_info, local_filename, rename_str=None
+        self,
+        open_r,
+        cache_file_key,
+        file_info,
+        local_filename,
+        rename_str=None,
+        remote_file=None,
     ):
         started = time.time()
+        # Content lands in <file>.part and is only moved into place once
+        # it is whole, so an interrupted transfer can be resumed and can
+        # never be mistaken for a finished file
+        part_file = local_filename + ".part"
+        written = 0
         try:
             if rename_str:
                 self._rename_old_file(local_filename, rename_str)
 
-            written = self._download_file(open_r, local_filename)
+            written = self._download_to_part(
+                open_r, part_file, remote_file, local_filename
+            )
+            os.replace(part_file, local_filename)
 
         except (Exception, KeyboardInterrupt) as e:
             if self._show_bar:
@@ -1198,11 +1251,9 @@ class DownloadLibrary:
                 )
             )
 
-            # Clean up broken downloaded file
-            try:
-                os.remove(local_filename)
-            except OSError:
-                pass
+            # Clean up the partial transfer. Any previously downloaded
+            # copy of the file is left untouched
+            _remove_quietly(part_file)
 
             if type(e).__name__ == "KeyboardInterrupt":
                 # A worker cannot exit the process, so flag it and let
@@ -1250,49 +1301,156 @@ class DownloadLibrary:
             )
         )
 
-    def _download_file(self, product_r, local_filename):
+    def _download_to_part(self, response, part_file, remote_file, local_filename):
+        """Stream into the part file, picking the transfer back up where
+        it broke off when the server allows it.
+
+        Returns the size of the finished part file.
+        """
         logger.info(
             "Downloading: {local_filename}".format(local_filename=local_filename)
         )
 
-        with open(local_filename, "wb") as outfile:
-            total_length = product_r.headers.get("content-length")
-            if total_length is None:  # no content length header
-                dl = 0
-                for data in product_r.iter_content(chunk_size=4096):
-                    dl += len(data)
-                    outfile.write(data)
-                    if self._show_bar:
-                        print(
-                            "\t{dl}".format(dl=dl),
-                            end="\r",
-                        )
-            else:
-                dl = 0
-                total_length = int(total_length)
-                for data in product_r.iter_content(chunk_size=4096):
-                    dl += len(data)
-                    outfile.write(data)
-                    pb_width = 50
-                    done = int(pb_width * dl / total_length)
-                    if self._show_bar:
-                        print(
-                            "\t{percent}% [{filler}{space}]".format(
-                                percent=int(done * (100 / pb_width)),
-                                filler="=" * min(max(done, 0), pb_width),
-                                space=" " * min(max((pb_width - done), 0), pb_width),
-                            ),
-                            end="\r",
-                        )
+        append = False
+        already = 0
+        total = _coerce_size(response.headers.get("Content-Length"))
+        attempt = 0
 
-                if dl < total_length:
-                    raise ValueError("Download did not complete")
-                if dl > total_length:
-                    if self._show_bar:
-                        print()
-                    logger.warning("Downloaded more content than expected")
+        while True:
+            try:
+                self._stream_to_file(response, part_file, append, already, total)
+                return _file_size(part_file)
+            except KeyboardInterrupt:
+                raise
+            except Exception as error:
+                attempt += 1
+                already = _file_size(part_file)
+                if (
+                    remote_file is None
+                    or attempt > self.retries
+                    or self._stop.is_set()
+                ):
+                    raise
 
-        return dl
+                logger.warning(
+                    "{name} stopped after {size} ({error}), picking it "
+                    "back up".format(
+                        name=os.path.basename(local_filename),
+                        size=_human_size(already),
+                        error=error,
+                    )
+                )
+
+                resumed = self._reopen_for_resume(
+                    remote_file, part_file, already
+                )
+                if resumed is None:
+                    raise
+                response, append, total = resumed
+                if append is False:
+                    already = 0
+
+    def _reopen_for_resume(self, remote_file, part_file, already):
+        """Ask for the rest of the file.
+
+        The server decides whether that is possible, and we believe the
+        status code rather than assuming support: 206 means the Range was
+        honoured and we append, 200 means it was ignored and the file
+        starts again from nothing.
+
+        Returns (response, append, total), or None if it cannot go on.
+        """
+        response = self._get_with_backoff(
+            remote_file, range_start=already or None
+        )
+        if response is None:
+            return None
+
+        status = getattr(response, "status_code", 200)
+
+        if status == 206:
+            total = _content_range_total(response)
+            if total is None:
+                length = _coerce_size(response.headers.get("Content-Length"))
+                total = None if length is None else already + length
+            return response, True, total
+
+        if status == 416:
+            # We hold at least as much as is on offer, so the part file
+            # is stale. Throw it away and take the file from the top
+            _remove_quietly(part_file)
+            response = self._get_with_backoff(remote_file)
+            if response is None:
+                return None
+            if getattr(response, "status_code", 200) != 200:
+                return None
+            return (
+                response,
+                False,
+                _coerce_size(response.headers.get("Content-Length")),
+            )
+
+        if status == 200:
+            self._note_range_unsupported()
+            return (
+                response,
+                False,
+                _coerce_size(response.headers.get("Content-Length")),
+            )
+
+        return None
+
+    def _note_range_unsupported(self):
+        with self._notice_lock:
+            if self._range_unsupported:
+                return
+            self._range_unsupported = True
+
+        logger.info(
+            "The server ignored a Range request, so interrupted files "
+            "start over instead of resuming"
+        )
+
+    def _stream_to_file(self, response, part_file, append, already, total):
+        """One pass of the transfer. `already` is what the part file
+        holds when appending, so the progress bar counts the whole file
+        """
+        written = already
+        with open(part_file, "ab" if append else "wb") as outfile:
+            for data in response.iter_content(chunk_size=4096):
+                written += len(data)
+                outfile.write(data)
+                if self._show_bar:
+                    self._draw_bar(written, total)
+
+        if total is not None and written < total:
+            raise ValueError(
+                "Download did not complete, {written} of {total} bytes".format(
+                    written=written, total=total
+                )
+            )
+        if total is not None and written > total:
+            if self._show_bar:
+                print()
+            logger.warning("Downloaded more content than expected")
+
+        return written
+
+    def _draw_bar(self, written, total):
+        if total is None:  # no content length header
+            print("\t{written}".format(written=written), end="\r")
+            return
+
+        pb_width = 50
+        done = int(pb_width * written / total)
+        print(
+            "\t{percent}% [{filler}{space}]".format(
+                percent=int(done * (100 / pb_width)),
+                filler="=" * min(max(done, 0), pb_width),
+                space=" " * min(max((pb_width - done), 0), pb_width),
+            ),
+            end="\r",
+        )
 
     def _load_cache_data(self, cache_file):
         try:
