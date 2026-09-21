@@ -1,3 +1,6 @@
+import json
+import threading
+
 from humblebundle_downloader.download_library import (
     DownloadLibrary,
     _coerce_size,
@@ -370,3 +373,72 @@ def test_order_without_subproducts_does_not_crash():
     )
     assert dl.skipped_orders == []
     assert dl._current_bundle == "Thin"
+
+
+###
+# parallel downloads
+###
+def test_jobs_defaults_to_sequential():
+    dl = DownloadLibrary("fake_library_path")
+    assert dl.jobs == 1
+    assert dl._queue is None
+
+
+def test_jobs_is_clamped_to_at_least_one():
+    assert DownloadLibrary("fake_library_path", jobs=0).jobs == 1
+    assert DownloadLibrary("fake_library_path", jobs=-4).jobs == 1
+
+
+def test_progress_bar_is_kept_when_sequential():
+    dl = DownloadLibrary("fake_library_path", progress_bar=True, jobs=1)
+    assert dl._show_bar is True
+
+
+def test_progress_bar_is_dropped_when_parallel():
+    dl = DownloadLibrary("fake_library_path", progress_bar=True, jobs=4)
+    assert dl._show_bar is False
+
+
+def test_session_is_shared_when_sequential():
+    dl = DownloadLibrary("fake_library_path", jobs=1)
+    assert dl._session() is dl.session
+
+
+def test_dry_run_starts_no_workers():
+    dl = DownloadLibrary("fake_library_path", jobs=8, dry_run=True)
+    dl._start_workers()
+    assert dl._queue is None
+    assert dl._workers == []
+
+
+def test_workers_start_and_stop_cleanly():
+    dl = DownloadLibrary("fake_library_path", jobs=3)
+    dl._start_workers()
+    assert len(dl._workers) == 3
+    dl._stop_workers()
+    assert dl._workers == []
+    assert dl._queue is None
+
+
+def test_cache_file_stays_valid_under_concurrent_writes(tmp_path):
+    dl = DownloadLibrary(str(tmp_path), jobs=8)
+    dl.cache_file = str(tmp_path / ".cache.json")
+    dl.cache_data = {}
+
+    def write_many(offset):
+        for i in range(25):
+            dl._update_cache_data(
+                "key-{0}-{1}".format(offset, i), {"url_last_modified": "x"}
+            )
+
+    threads = [
+        threading.Thread(target=write_many, args=(n,)) for n in range(8)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    with open(dl.cache_file) as handle:
+        written = json.load(handle)
+    assert len(written) == 200

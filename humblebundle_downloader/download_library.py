@@ -2,10 +2,12 @@ import os
 import sys
 import json
 import time
+import queue
 import parsel
 import logging
 import datetime
 import requests
+import threading
 import http.cookiejar
 
 logger = logging.getLogger(__name__)
@@ -88,9 +90,20 @@ class DownloadLibrary:
         update=False,
         dry_run=False,
         print_urls=False,
+        jobs=1,
     ):
         self.library_path = library_path
+        self.jobs = max(1, int(jobs))
         self.progress_bar = progress_bar
+        # Several \r progress bars writing at once is unreadable, so in
+        # parallel mode each file reports once, when it finishes
+        self._show_bar = progress_bar and self.jobs == 1
+
+        self._queue = None
+        self._workers = []
+        self._stop = threading.Event()
+        self._cache_lock = threading.Lock()
+        self._thread_local = threading.local()
         self.ext_include = (
             [] if ext_include is None else list(map(str.lower, ext_include))
         )
@@ -146,15 +159,28 @@ class DownloadLibrary:
             self.purchase_keys if self.purchase_keys else self._get_purchase_keys()
         )
 
-        if self.trove is True:
-            logger.info("Only checking the Humble Trove...")
-            self._current_bundle = "Humble Trove"
-            for product in self._get_trove_products():
-                title = _clean_name(product["human-name"])
-                self._process_trove_product(title, product)
-        else:
-            for order_id in self.purchase_keys:
-                self._process_order_id(order_id)
+        self._start_workers()
+        try:
+            if self.trove is True:
+                logger.info("Only checking the Humble Trove...")
+                self._current_bundle = "Humble Trove"
+                for product in self._get_trove_products():
+                    title = _clean_name(product["human-name"])
+                    self._process_trove_product(title, product)
+            else:
+                for order_id in self.purchase_keys:
+                    self._process_order_id(order_id)
+        except KeyboardInterrupt:
+            self._stop.set()
+            logger.warning("Interrupted, waiting for downloads in flight...")
+            self._stop_workers()
+            sys.exit()
+
+        self._stop_workers()
+
+        if self._stop.is_set():
+            # A worker hit Ctrl-C, so the run is not complete
+            sys.exit()
 
         if self.dry_run is True:
             self._log_dry_run_summary()
@@ -167,6 +193,70 @@ class DownloadLibrary:
                     keys=" ".join(self.skipped_orders),
                 )
             )
+
+    def _start_workers(self):
+        if self.jobs == 1 or self.dry_run is True:
+            # Nothing to parallelise: a dry run makes no downloads
+            return
+
+        logger.info(
+            "Downloading with {jobs} parallel jobs".format(jobs=self.jobs)
+        )
+        # Bounded, so traversal cannot run far ahead of the downloads
+        self._queue = queue.Queue(maxsize=self.jobs * 4)
+        for _ in range(self.jobs):
+            worker = threading.Thread(target=self._worker, daemon=True)
+            worker.start()
+            self._workers.append(worker)
+
+    def _stop_workers(self):
+        if self._queue is None:
+            return
+
+        for _ in self._workers:
+            self._queue.put(None)
+        for worker in self._workers:
+            worker.join()
+
+        self._workers = []
+        self._queue = None
+
+    def _worker(self):
+        while True:
+            job = self._queue.get()
+            try:
+                if job is None:
+                    return
+                if self._stop.is_set():
+                    continue
+                self._run_download_job(job)
+            except Exception:
+                logger.exception(
+                    "Failed to download {remote_file}".format(
+                        remote_file=job.get("remote_file")
+                    )
+                )
+            finally:
+                self._queue.task_done()
+
+    def _session(self):
+        """requests.Session is not documented as thread safe, so every
+        worker thread gets its own, built from the authenticated one
+        """
+        if self._queue is None:
+            return self.session
+
+        session = getattr(self._thread_local, "session", None)
+        if session is None:
+            session = self._new_session()
+            self._thread_local.session = session
+        return session
+
+    def _new_session(self):
+        session = requests.Session()
+        session.headers.update(self.session.headers)
+        session.cookies.update(self.session.cookies)
+        return session
 
     def _get_trove_download_url(self, machine_name, web_name):
         try:
@@ -549,11 +639,15 @@ class DownloadLibrary:
 
                         downloaded = False
                         try:
+                            # Not queued: the manifest is read out of this
+                            # page, so it has to be on disk before the
+                            # data files below can even be named
                             downloaded = self._check_cache_and_download(
                                 cache_file_key,
                                 asmjs_url,
                                 local_folder,
                                 asmjs_html_filename,
+                                synchronous=True,
                             )
                         except FileExistsError:
                             pass  # we should download the asm/data files even if the html file was previously downloaded
@@ -781,18 +875,20 @@ class DownloadLibrary:
             )
 
     def _update_cache_data(self, cache_file_key, file_info):
-        self.cache_data[cache_file_key] = file_info
         # Update cache file with newest data so if the script
-        # quits it can keep track of the progress
-        # Note: Only safe because of single thread,
-        # need to change if refactor to multi threading
-        with open(self.cache_file, "w") as outfile:
-            json.dump(
-                self.cache_data,
-                outfile,
-                sort_keys=True,
-                indent=4,
-            )
+        # quits it can keep track of the progress.
+        # The whole file is rewritten each time, so the mutation and the
+        # write are held together under one lock: without it, parallel
+        # jobs interleave and truncate each other's json
+        with self._cache_lock:
+            self.cache_data[cache_file_key] = file_info
+            with open(self.cache_file, "w") as outfile:
+                json.dump(
+                    self.cache_data,
+                    outfile,
+                    sort_keys=True,
+                    indent=4,
+                )
 
     def _check_cache_and_download(
         self,
@@ -801,6 +897,7 @@ class DownloadLibrary:
         local_folder,
         local_filename,
         file_size=None,
+        synchronous=False,
     ):
         cache_file_info = self.cache_data.get(cache_file_key, {})
 
@@ -817,8 +914,31 @@ class DownloadLibrary:
             )
             return False
 
+        job = {
+            "cache_file_key": cache_file_key,
+            "remote_file": remote_file,
+            "local_folder": local_folder,
+            "local_filename": local_filename,
+            "cache_file_info": cache_file_info,
+        }
+
+        if self._queue is not None and synchronous is False:
+            # Hand it to a worker. Blocks once the queue is full, which
+            # keeps traversal from running away from the downloads
+            self._queue.put(job)
+            return False
+
+        return self._run_download_job(job)
+
+    def _run_download_job(self, job):
+        cache_file_key = job["cache_file_key"]
+        remote_file = job["remote_file"]
+        local_folder = job["local_folder"]
+        local_filename = job["local_filename"]
+        cache_file_info = job["cache_file_info"]
+
         try:
-            remote_file_r = self.session.get(remote_file, stream=True)
+            remote_file_r = self._session().get(remote_file, stream=True)
         except Exception:
             logger.exception(
                 "Failed to download {remote_file}".format(remote_file=remote_file)
@@ -873,14 +993,15 @@ class DownloadLibrary:
     def _process_download(
         self, open_r, cache_file_key, file_info, local_filename, rename_str=None
     ):
+        started = time.time()
         try:
             if rename_str:
                 self._rename_old_file(local_filename, rename_str)
 
-            self._download_file(open_r, local_filename)
+            written = self._download_file(open_r, local_filename)
 
         except (Exception, KeyboardInterrupt) as e:
-            if self.progress_bar:
+            if self._show_bar:
                 # Do not overwrite the progress bar on next print
                 print()
             logger.error(
@@ -896,12 +1017,16 @@ class DownloadLibrary:
                 pass
 
             if type(e).__name__ == "KeyboardInterrupt":
-                sys.exit()
+                # A worker cannot exit the process, so flag it and let
+                # start() shut the run down once the workers are joined
+                self._stop.set()
+                if threading.current_thread() is threading.main_thread():
+                    sys.exit()
 
-            return False
+            result = False
 
         else:
-            if self.progress_bar:
+            if self._show_bar:
                 # Do not overwrite the progress bar on next print
                 print()
             if "url_last_modified" not in file_info:
@@ -911,11 +1036,31 @@ class DownloadLibrary:
                     "%a, %d %b %Y %H:%M:%S %Z"
                 )
             self._update_cache_data(cache_file_key, file_info)
+            self._log_completed(local_filename, written, time.time() - started)
+            result = True
 
         finally:
             # Since its a stream connection, make sure to close it
-            open_r.connection.close()
-            return True
+            try:
+                open_r.connection.close()
+            except Exception:
+                pass
+
+        return result
+
+    def _log_completed(self, local_filename, written, elapsed):
+        """In parallel mode the start lines interleave, so say what
+        finished, and how big it turned out to be
+        """
+        if self.jobs == 1:
+            return
+        logger.info(
+            "Downloaded {name} ({size} in {elapsed:.1f}s)".format(
+                name=os.path.basename(local_filename),
+                size=_human_size(written or 0),
+                elapsed=elapsed,
+            )
+        )
 
     def _download_file(self, product_r, local_filename):
         logger.info(
@@ -929,7 +1074,7 @@ class DownloadLibrary:
                 for data in product_r.iter_content(chunk_size=4096):
                     dl += len(data)
                     outfile.write(data)
-                    if self.progress_bar:
+                    if self._show_bar:
                         print(
                             "\t{dl}".format(dl=dl),
                             end="\r",
@@ -942,7 +1087,7 @@ class DownloadLibrary:
                     outfile.write(data)
                     pb_width = 50
                     done = int(pb_width * dl / total_length)
-                    if self.progress_bar:
+                    if self._show_bar:
                         print(
                             "\t{percent}% [{filler}{space}]".format(
                                 percent=int(done * (100 / pb_width)),
@@ -955,8 +1100,11 @@ class DownloadLibrary:
                 if dl < total_length:
                     raise ValueError("Download did not complete")
                 if dl > total_length:
-                    print()
-                    logger.warn("Downloaded more content than expected")
+                    if self._show_bar:
+                        print()
+                    logger.warning("Downloaded more content than expected")
+
+        return dl
 
     def _load_cache_data(self, cache_file):
         try:

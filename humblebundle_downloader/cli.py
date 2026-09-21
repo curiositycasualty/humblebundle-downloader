@@ -69,6 +69,21 @@ def parse_args(args):
         help="Display progress bar for downloads",
     )
     parser.add_argument(
+        "-j",
+        "--jobs",
+        type=int,
+        default=4,
+        help="Number of files to download at once (default: 4)",
+    )
+    parser.add_argument(
+        "--no-parallel",
+        action="store_true",
+        help=(
+            "Download one file at a time. Overrides --jobs, and gets "
+            "you the per-file progress bar back"
+        ),
+    )
+    parser.add_argument(
         "-n",
         "--dry-run",
         action="store_true",
@@ -125,8 +140,20 @@ def parse_args(args):
     return parser.parse_args(args)
 
 
+def resolve_jobs(cli_args):
+    """--no-parallel wins over --jobs, so an alias carrying -j can still
+    be overridden on the command line without an argparse conflict
+    """
+    return 1 if cli_args.no_parallel else cli_args.jobs
+
+
 def cli():
     cli_args = parse_args(sys.argv[1:])
+
+    if cli_args.jobs < 1:
+        sys.exit("--jobs must be at least 1")
+
+    jobs = resolve_jobs(cli_args)
 
     from .download_library import DownloadLibrary
 
@@ -144,4 +171,5 @@ def cli():
         update=cli_args.update,
         dry_run=cli_args.dry_run,
         print_urls=cli_args.print_urls,
+        jobs=jobs,
     ).start()

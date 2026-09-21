@@ -6,8 +6,15 @@
 - Added `--dry-run`/`-n` to report the number of files and total size of a download before
   downloading anything, broken down per bundle
 - Added `--print-urls` to print the url of each file being collected to stdout, one per line
+- Downloads now run 4 at a time by default. `--jobs`/`-j` sets the number, `--no-parallel` goes
+  back to one at a time and overrides `--jobs`. The cache write is locked, each worker gets its own
+  session, and `--progress` draws the per-file bar only when sequential, reporting each file once
+  on completion otherwise
 - Added `--prefer-format`/`-f` to keep a single format per item, trying the given extensions in
   order and falling back to the largest available file when none of them are present
+- Fixed `_process_download` always reporting success: a `return True` in its `finally` block
+  swallowed the `return False` from the failure path, so a failed download looked like a completed
+  one to its caller
 - Fixed a crash (`KeyError: 'product'`) when the order api returns anything other than an order,
   for example an authorization error. Such an order is now reported with the reason and skipped,
   and the rest of the library still downloads

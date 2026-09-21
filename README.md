@@ -15,6 +15,7 @@ After that it will only download the content that has been updated or is missing
 - downloads new and updated content from your Humble Bundle Library on each run _(only check for updates if using `--update`)_
 - cli command for easy use (downloading will also work on a headless system)
 - works for SSO and 2FA accounts
+- downloads several files at once, 4 by default _(`--jobs`/`--no-parallel` flags)_
 - optional progress bar for each item downloaded _(`--progress` flag)_
 - optional dry run that reports how much there is to download before downloading any of it _(`--dry-run` flag)_
 - optional listing of the url of every file being collected _(`--print-urls` flag)_
@@ -105,7 +106,35 @@ Note that Humble Bundle urls are signed and expire after a while, so a saved lis
 a short time.
 
 
-### 5. Picking one format per item
+### 5. Parallel downloads
+
+Four files download at once by default. Change the number with `--jobs`/`-j`:
+
+`hbd --cookie-file cookies.txt --library-path "Comics" -j 8`
+
+`--no-parallel` goes back to one file at a time, and overrides `--jobs`, so it still works when
+`-j` is baked into a shell alias.
+
+Because several `\r` progress bars writing at once is unreadable, `--progress` draws the per-file
+bar only when running sequentially. In parallel each file reports once, as it finishes:
+
+```
+Downloaded Some Comic Vol1.cbz (24.10 MiB in 3.4s)
+Downloaded Another Book.epub (8.40 MiB in 1.1s)
+```
+
+A few notes on what parallelism does and does not touch. Each worker gets its own
+`requests.Session`, built from the authenticated one, since `requests.Session` is not documented as
+thread safe. `.cache.json` is rewritten in full after every completed file, so the update and the
+write are held under one lock — without it, concurrent jobs truncate each other's json. asm.js games
+still download their page sequentially, because the list of data files to fetch is read out of that
+page. Dry runs stay single threaded, having nothing to download.
+
+If Humble starts refusing connections or throttling you, lower `-j` before assuming anything else
+is wrong.
+
+
+### 6. Picking one format per item
 
 Bundles usually ship the same book or comic several times over: `.cbz`, `.epub`, `.pdf` and `.mobi`
 of the same thing. `--prefer-format` (or `-f`) keeps one format instead of all of them:
