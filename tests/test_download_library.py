@@ -1,3 +1,9 @@
+import os
+
+import queue
+import signal
+import logging
+
 import io
 
 import pytest
@@ -11,6 +17,7 @@ import threading
 
 from humblebundle_downloader.download_library import (
     DownloadLibrary,
+    Interrupted,
     ProgressReporter,
     _coerce_size,
     _file_ext,
@@ -756,3 +763,113 @@ def test_reporter_only_used_for_parallel_runs_with_progress():
     parallel = DownloadLibrary("x", jobs=4, progress_bar=True)
     assert parallel._progress is not None
     assert parallel._show_bar is False
+
+
+###
+# interrupt handling
+###
+def test_stream_to_file_stops_between_chunks(tmp_path):
+    dl = DownloadLibrary(str(tmp_path))
+    dl._stop.set()
+    with pytest.raises(Interrupted):
+        dl._stream_to_file(
+            ChunkedResponse(b"abcdefgh"), str(tmp_path / "f.part"),
+            False, 0, 8,
+        )
+
+
+def test_interrupted_transfer_is_not_reported_as_a_failure(tmp_path, caplog):
+    dl = DownloadLibrary(str(tmp_path))
+    dl.cache_file = str(tmp_path / ".cache.json")
+    dl.cache_data = {}
+    dl._stop.set()
+
+    target = str(tmp_path / "thing.bin")
+    with caplog.at_level(logging.ERROR):
+        result = dl._process_download(
+            ChunkedResponse(b"abcdefgh", {"Content-Length": "8"}),
+            "key", {}, target, remote_file="https://x/thing.bin",
+        )
+
+    assert result is False
+    assert not os.path.exists(target + ".part")
+    assert "Failed to download" not in caplog.text
+    assert dl.cache_data == {}
+
+
+def test_interrupted_transfer_leaves_an_existing_file_alone(tmp_path):
+    keeper = tmp_path / "thing.bin"
+    keeper.write_bytes(b"the copy from last time")
+    dl = DownloadLibrary(str(tmp_path))
+    dl.cache_file = str(tmp_path / ".cache.json")
+    dl.cache_data = {}
+    dl._stop.set()
+
+    dl._process_download(
+        ChunkedResponse(b"abcdefgh", {"Content-Length": "8"}),
+        "key", {}, str(keeper), remote_file="https://x/thing.bin",
+    )
+    assert keeper.read_bytes() == b"the copy from last time"
+
+
+def test_stop_workers_forces_an_exit_when_a_worker_will_not_stop():
+    dl = DownloadLibrary("fake_library_path", jobs=1)
+    forced = []
+    dl._hard_exit = lambda: forced.append(True)
+
+    release = threading.Event()
+    dl._queue = queue.Queue()
+    wedged = threading.Thread(target=release.wait, daemon=True)
+    wedged.start()
+    dl._workers = [wedged]
+
+    dl._stop_workers(timeout=0.2)
+    assert forced == [True]
+    release.set()
+    wedged.join(timeout=5)
+
+
+def test_stop_workers_does_not_force_an_exit_normally():
+    dl = DownloadLibrary("fake_library_path", jobs=2)
+    forced = []
+    dl._hard_exit = lambda: forced.append(True)
+    dl._start_workers()
+    dl._stop_workers(timeout=5)
+    assert forced == []
+    assert dl._workers == []
+
+
+def test_interrupt_handler_is_installed_and_restored():
+    dl = DownloadLibrary("fake_library_path")
+    before = signal.getsignal(signal.SIGINT)
+    previous = dl._install_interrupt_handler()
+    assert signal.getsignal(signal.SIGINT) is not before
+    dl._restore_interrupt_handler(previous)
+    assert signal.getsignal(signal.SIGINT) is before
+
+
+def test_first_interrupt_sets_stop_and_raises():
+    dl = DownloadLibrary("fake_library_path")
+    previous = dl._install_interrupt_handler()
+    handler = signal.getsignal(signal.SIGINT)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            handler(signal.SIGINT, None)
+        assert dl._stop.is_set()
+    finally:
+        dl._restore_interrupt_handler(previous)
+
+
+def test_second_interrupt_exits_hard():
+    dl = DownloadLibrary("fake_library_path")
+    forced = []
+    dl._hard_exit = lambda: forced.append(True)
+    previous = dl._install_interrupt_handler()
+    handler = signal.getsignal(signal.SIGINT)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            handler(signal.SIGINT, None)
+        handler(signal.SIGINT, None)   # no raise: it leaves instead
+        assert forced == [True]
+    finally:
+        dl._restore_interrupt_handler(previous)

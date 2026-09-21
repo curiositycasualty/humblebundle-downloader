@@ -6,6 +6,7 @@ import email
 import queue
 import parsel
 import shutil
+import signal
 import logging
 import datetime
 import requests
@@ -21,6 +22,19 @@ logger = logging.getLogger(__name__)
 RETRY_STATUSES = (500, 502, 503, 504)
 THROTTLE_STATUSES = (429,)
 DEFAULT_COOLDOWN = 30
+
+# Conventional exit status for "killed by SIGINT"
+INTERRUPT_EXIT_CODE = 130
+# How long a first Ctrl-C waits for transfers to wind themselves up
+SHUTDOWN_GRACE = 10
+
+
+class Interrupted(Exception):
+    """Raised inside a transfer when the run is being shut down.
+
+    Distinct from a failure: there is nothing to retry or resume, and it
+    should not be reported as a download that went wrong.
+    """
 
 
 def _package_version():
@@ -402,28 +416,39 @@ class DownloadLibrary:
             self.purchase_keys if self.purchase_keys else self._get_purchase_keys()
         )
 
-        self._start_workers()
+        previous_handler = self._install_interrupt_handler()
         try:
-            if self.trove is True:
-                logger.info("Only checking the Humble Trove...")
-                self._current_bundle = "Humble Trove"
-                for product in self._get_trove_products():
-                    title = _clean_name(product["human-name"])
-                    self._process_trove_product(title, product)
-            else:
-                for order_id in self.purchase_keys:
-                    self._process_order_id(order_id)
-        except KeyboardInterrupt:
-            self._stop.set()
-            logger.warning("Interrupted, waiting for downloads in flight...")
-            self._stop_workers()
-            sys.exit()
+            # One handler for the whole run, not just the walk: a Ctrl-C
+            # is at least as likely to land while waiting on the workers
+            # as during traversal, and it has to be caught either way
+            try:
+                self._start_workers()
 
-        self._stop_workers()
+                if self.trove is True:
+                    logger.info("Only checking the Humble Trove...")
+                    self._current_bundle = "Humble Trove"
+                    for product in self._get_trove_products():
+                        title = _clean_name(product["human-name"])
+                        self._process_trove_product(title, product)
+                else:
+                    for order_id in self.purchase_keys:
+                        self._process_order_id(order_id)
 
-        if self._stop.is_set():
-            # A worker hit Ctrl-C, so the run is not complete
-            sys.exit()
+                self._stop_workers()
+
+                if self._stop.is_set():
+                    # A sequential transfer was interrupted
+                    sys.exit(INTERRUPT_EXIT_CODE)
+            except KeyboardInterrupt:
+                self._stop.set()
+                # Bounded: transfers check the stop flag between chunks,
+                # so this is quick, and anything that will not stop gets
+                # left behind rather than holding the run open
+                self._stop_workers(timeout=SHUTDOWN_GRACE)
+                logger.warning("Interrupted, nothing further was downloaded")
+                sys.exit(INTERRUPT_EXIT_CODE)
+        finally:
+            self._restore_interrupt_handler(previous_handler)
 
         if self.dry_run is True:
             self._log_dry_run_summary()
@@ -442,6 +467,66 @@ class DownloadLibrary:
                     keys=" ".join(self.skipped_orders),
                 )
             )
+
+    def _hard_exit(self):
+        """Leave now, without waiting on anything that might be stuck.
+
+        os._exit skips interpreter shutdown, which is the point: nothing
+        it would wait for can keep us here. Part files are left where
+        they are and the next run truncates them.
+        """
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.flush()
+            except Exception:
+                pass
+        os._exit(INTERRUPT_EXIT_CODE)
+
+    def _install_interrupt_handler(self):
+        """First Ctrl-C asks for a tidy stop, second one insists.
+
+        Signal handlers only run on the main thread, so this is where
+        both presses are seen no matter which thread is transferring.
+        """
+        if threading.current_thread() is not threading.main_thread():
+            return None
+
+        def handler(signum, frame):
+            if self._stop.is_set():
+                if self._progress is not None:
+                    self._progress.clear()
+                sys.stderr.write(
+                    "\nQuitting now. Partly downloaded files are left "
+                    "behind and will be redone next run.\n"
+                )
+                self._hard_exit()
+                return
+
+            self._stop.set()
+            if self._progress is not None:
+                self._progress.clear()
+            sys.stderr.write(
+                "\nStopping. Waiting for downloads in flight, press "
+                "Ctrl-C again to quit immediately.\n"
+            )
+            sys.stderr.flush()
+            # Same as the default handler, so anything the main thread
+            # is blocked on unwinds exactly as it used to
+            raise KeyboardInterrupt
+
+        try:
+            return signal.signal(signal.SIGINT, handler)
+        except ValueError:
+            # Not the main thread of the main interpreter
+            return None
+
+    def _restore_interrupt_handler(self, previous):
+        if previous is None:
+            return
+        try:
+            signal.signal(signal.SIGINT, previous)
+        except (ValueError, TypeError):
+            pass
 
     def _configure_session(self, session):
         """Transport level retries, plus a user agent that says who we
@@ -532,14 +617,25 @@ class DownloadLibrary:
             worker.start()
             self._workers.append(worker)
 
-    def _stop_workers(self):
+    def _stop_workers(self, timeout=None):
         if self._queue is None:
             return
 
         for _ in self._workers:
-            self._queue.put(None)
+            try:
+                self._queue.put_nowait(None)
+            except queue.Full:
+                # Workers time out on get() and notice _stop anyway
+                pass
+
+        deadline = None if timeout is None else time.time() + timeout
         for worker in self._workers:
-            worker.join()
+            if deadline is None:
+                worker.join()
+            else:
+                worker.join(timeout=max(0, deadline - time.time()))
+
+        stubborn = [worker for worker in self._workers if worker.is_alive()]
 
         self._workers = []
         self._queue = None
@@ -547,9 +643,28 @@ class DownloadLibrary:
         if self._progress is not None:
             self._progress.stop()
 
+        if stubborn:
+            # A transfer is wedged somewhere uninterruptible. The user
+            # asked to stop, so stop
+            logger.warning(
+                "{count} download(s) did not stop within {grace}s, "
+                "quitting anyway".format(
+                    count=len(stubborn), grace=timeout
+                )
+            )
+            self._hard_exit()
+
     def _worker(self):
         while True:
-            job = self._queue.get()
+            try:
+                # Time limited so a shutdown is noticed even when the
+                # sentinel cannot be delivered past a full queue
+                job = self._queue.get(timeout=0.25)
+            except queue.Empty:
+                if self._stop.is_set():
+                    return
+                continue
+
             try:
                 if job is None:
                     return
@@ -1403,11 +1518,20 @@ class DownloadLibrary:
             if self._show_bar:
                 # Do not overwrite the progress bar on next print
                 print()
-            logger.error(
-                "Failed to download file {local_filename}".format(
-                    local_filename=local_filename
+
+            if isinstance(e, Interrupted):
+                # Asked to stop, so this is not a failure worth shouting
+                logger.debug(
+                    "Stopped downloading {local_filename}".format(
+                        local_filename=local_filename
+                    )
                 )
-            )
+            else:
+                logger.error(
+                    "Failed to download file {local_filename}".format(
+                        local_filename=local_filename
+                    )
+                )
 
             if self._progress is not None:
                 self._progress.file_finished(label, ok=False)
@@ -1422,7 +1546,7 @@ class DownloadLibrary:
                 # start() shut the run down once the workers are joined
                 self._stop.set()
                 if threading.current_thread() is threading.main_thread():
-                    sys.exit()
+                    sys.exit(INTERRUPT_EXIT_CODE)
 
             result = False
 
@@ -1494,7 +1618,8 @@ class DownloadLibrary:
                     response, part_file, append, already, total, label
                 )
                 return _file_size(part_file)
-            except KeyboardInterrupt:
+            except (KeyboardInterrupt, Interrupted):
+                # Shutting down: nothing to resume, nothing to report
                 raise
             except Exception as error:
                 attempt += 1
@@ -1598,6 +1723,10 @@ class DownloadLibrary:
         written = already
         with open(part_file, "ab" if append else "wb") as outfile:
             for data in response.iter_content(chunk_size=4096):
+                if self._stop.is_set():
+                    # Checked between chunks so a Ctrl-C stops a large
+                    # transfer promptly instead of at the end of it
+                    raise Interrupted()
                 written += len(data)
                 outfile.write(data)
                 if self._show_bar:

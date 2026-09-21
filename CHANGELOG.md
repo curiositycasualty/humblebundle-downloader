@@ -6,6 +6,11 @@
 - Added `--dry-run`/`-n` to report the number of files and total size of a download before
   downloading anything, broken down per bundle
 - Added `--print-urls` to print the url of each file being collected to stdout, one per line
+- Ctrl+C now stops a run reliably. The first press asks transfers to wind up, which they notice
+  between chunks rather than at the end of the current file, cleans up partial downloads and exits
+  `130`; the second press quits immediately whatever state things are in. A transfer wedged
+  somewhere uninterruptible is given ten seconds before the run leaves without it. Interrupted runs
+  previously exited `0`, and a Ctrl+C arriving while waiting on downloads escaped as a traceback
 - `--progress` now shows a live status line during parallel downloads: files finished, transfers in
   flight with each one's percentage, total fetched and current throughput, truncated to the
   terminal width. One reporter thread owns the line, so concurrent transfers cannot shred each

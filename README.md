@@ -139,6 +139,22 @@ Running sequentially (`--no-parallel`) keeps the original per-file bar. The stat
 drawn to a terminal: piped or redirected output gets the completion lines alone, with no carriage
 returns to clean up afterwards.
 
+
+### Stopping a run
+
+**Ctrl+C** asks for a tidy stop. Transfers check between chunks, so they give up promptly rather
+than at the end of whatever multi-gigabyte file they happen to be on. Partly downloaded `.part`
+files are removed, the cache keeps everything already finished, and the run exits with status
+`130`. A second run picks up where this one left off.
+
+**Ctrl+C again** quits immediately, whatever state anything is in. Partly downloaded files are left
+behind, and the next run replaces them.
+
+If a transfer is wedged somewhere that cannot be interrupted, the first Ctrl+C waits ten seconds
+for it before leaving anyway, so one press is always enough eventually and two are enough at once.
+Either way the exit status is `130`, the usual convention for "stopped by SIGINT" — note that
+upstream exited `0` here, so a wrapper script can now tell an interrupted run from a complete one.
+
 A few notes on what parallelism does and does not touch. Each worker gets its own
 `requests.Session`, built from the authenticated one, since `requests.Session` is not documented as
 thread safe. `.cache.json` is rewritten in full after every completed file, so the update and the
