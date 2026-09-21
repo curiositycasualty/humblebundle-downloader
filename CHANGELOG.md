@@ -6,6 +6,8 @@
 - Added `--dry-run`/`-n` to report the number of files and total size of a download before
   downloading anything, broken down per bundle
 - Added `--print-urls` to print the url of each file being collected to stdout, one per line
+- Added `--prefer-format`/`-f` to keep a single format per item, trying the given extensions in
+  order and falling back to the largest available file when none of them are present
 - Fixed the test suite calling `_should_download_file_type`, which was renamed to
   `_should_download_ext`
 

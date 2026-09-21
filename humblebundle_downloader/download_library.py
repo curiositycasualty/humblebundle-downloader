@@ -32,6 +32,20 @@ def _human_size(num_bytes):
         size /= 1024
 
 
+def _file_ext(filename):
+    """Lowercase extension of a filename, or '' when it has none"""
+    if "." not in filename:
+        return ""
+    return filename.rsplit(".", 1)[-1].lower()
+
+
+def _struct_filename(file_type):
+    """Filename of a download_struct entry, or None if it has no url"""
+    if "url" not in file_type or "web" not in file_type["url"]:
+        return None
+    return file_type["url"]["web"].split("?")[0].split("/")[-1]
+
+
 def _coerce_size(raw_size):
     """The api is not consistent about the type used for file sizes"""
     if raw_size is None:
@@ -53,6 +67,7 @@ class DownloadLibrary:
         ext_include=None,
         ext_exclude=None,
         platform_include=None,
+        prefer_format=None,
         purchase_keys=None,
         trove=False,
         update=False,
@@ -72,6 +87,14 @@ class DownloadLibrary:
             # if 'all', then do not need to use this check
             platform_include = []
         self.platform_include = list(map(str.lower, platform_include))
+
+        # Ordered: the first format with a match wins, so the last entry
+        # acts as the default
+        self.prefer_format = (
+            []
+            if prefer_format is None
+            else [ext.lower().lstrip(".") for ext in prefer_format]
+        )
 
         self.purchase_keys = purchase_keys
         self.trove = trove
@@ -299,6 +322,71 @@ class DownloadLibrary:
             os.rename(local_filename, new_name)
             logger.info("Renamed older file to {new_name}".format(new_name=new_name))
 
+    def _select_by_format(self, file_types, product_title, platform):
+        """Narrow a platform's files down to the preferred format.
+
+        Tries each --prefer-format extension in order and keeps every
+        file of the first one that matches, so multi part items (a comic
+        split across volumes) survive intact. When none of the preferred
+        formats are present, falls back to the single largest file.
+        Entries without a downloadable url (asm.js games, external
+        links) are never dropped, since they have no format to compare.
+        """
+        if not self.prefer_format:
+            return file_types
+
+        passthrough = []
+        candidates = []
+        for file_type in file_types:
+            filename = _struct_filename(file_type)
+            if filename is None:
+                passthrough.append(file_type)
+            elif self._should_download_file_by_ext_and_log(filename) is True:
+                candidates.append((file_type, filename, _file_ext(filename)))
+
+        if len(candidates) < 2:
+            # Nothing to choose between
+            return passthrough + [entry[0] for entry in candidates]
+
+        for wanted in self.prefer_format:
+            chosen = [entry for entry in candidates if entry[2] == wanted]
+            if chosen:
+                self._log_format_choice(
+                    product_title, platform, wanted, candidates, chosen
+                )
+                return passthrough + [entry[0] for entry in chosen]
+
+        # No preferred format available, so take the biggest file there is
+        largest = max(
+            candidates,
+            key=lambda entry: _coerce_size(entry[0].get("file_size")) or 0,
+        )
+        self._log_format_choice(
+            product_title, platform, None, candidates, [largest]
+        )
+        return passthrough + [largest[0]]
+
+    def _log_format_choice(
+        self, product_title, platform, wanted, candidates, chosen
+    ):
+        dropped = [
+            entry[1] for entry in candidates if entry not in chosen
+        ]
+        if not dropped:
+            return
+        if wanted is None:
+            reason = "no preferred format available, taking the largest file"
+        else:
+            reason = "preferring {wanted}".format(wanted=wanted)
+        logger.info(
+            "{product_title} [{platform}]: {reason}, skipping {dropped}".format(
+                product_title=product_title,
+                platform=platform,
+                reason=reason,
+                dropped=", ".join(dropped),
+            )
+        )
+
     def _process_product(self, order_id, bundle_title, product):
         product_title = _clean_name(product["human_name"])
         # Get all types of download for a product
@@ -322,7 +410,11 @@ class DownloadLibrary:
                     pass
 
             # Download each file type of a product
-            for file_type in download_type["download_struct"]:
+            for file_type in self._select_by_format(
+                download_type["download_struct"],
+                product_title,
+                download_type["platform"],
+            ):
                 try:
                     if "url" in file_type and "web" in file_type["url"]:
                         # downloadable URL
@@ -855,8 +947,7 @@ class DownloadLibrary:
         return True
 
     def _should_download_file_by_ext(self, filename):
-        ext = filename.split(".")[-1]
-        return self._should_download_ext(ext)
+        return self._should_download_ext(_file_ext(filename))
 
     def _should_download_ext(self, ext):
         ext = ext.lower()

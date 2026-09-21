@@ -85,6 +85,17 @@ def parse_args(args):
             "one per line (all other output goes to stderr)"
         ),
     )
+    parser.add_argument(
+        "-f",
+        "--prefer-format",
+        type=str,
+        nargs="*",
+        help=(
+            "Only get one format per item, trying these extensions in "
+            "order and falling back to the largest file when none of "
+            "them are available. Ex: -f cbz epub pdf"
+        ),
+    )
     filter_ext = parser.add_mutually_exclusive_group()
     filter_ext.add_argument(
         "-e",
@@ -127,6 +138,7 @@ def cli():
         ext_include=cli_args.include,
         ext_exclude=cli_args.exclude,
         platform_include=cli_args.platform,
+        prefer_format=cli_args.prefer_format,
         purchase_keys=cli_args.keys,
         trove=cli_args.trove,
         update=cli_args.update,

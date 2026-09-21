@@ -1,6 +1,7 @@
 from humblebundle_downloader.download_library import (
     DownloadLibrary,
     _coerce_size,
+    _file_ext,
     _human_size,
 )
 
@@ -178,3 +179,104 @@ def test_dry_run_counts_file_changed_since_last_run():
         {"url_last_modified": "Mon, 01 Jan 2024 00:00:00 GMT"},
     )
     assert len(dl.pending_downloads) == 1
+
+
+###
+# _file_ext
+###
+def test_file_ext():
+    assert _file_ext("book.CBZ") == "cbz"
+    assert _file_ext("book.tar.gz") == "gz"
+    assert _file_ext("README") == ""
+
+
+###
+# _select_by_format
+###
+def _web(name, size=None):
+    entry = {"url": {"web": "https://dl.hb.com/" + name}}
+    if size is not None:
+        entry["file_size"] = size
+    return entry
+
+
+def _names(selected):
+    return [
+        entry["url"]["web"].rsplit("/", 1)[-1]
+        for entry in selected
+        if "url" in entry
+    ]
+
+
+def _select(struct, **kwargs):
+    dl = DownloadLibrary("fake_library_path", **kwargs)
+    return dl._select_by_format(struct, "Item", "ebook")
+
+
+def test_prefer_format_off_keeps_everything():
+    struct = [_web("a.pdf", 10), _web("a.cbz", 20)]
+    assert _select(struct) == struct
+
+
+def test_prefer_format_picks_first_available():
+    struct = [_web("a.pdf", 10), _web("a.cbz", 20), _web("a.epub", 5)]
+    selected = _select(struct, prefer_format=["cbz", "epub", "pdf"])
+    assert _names(selected) == ["a.cbz"]
+
+
+def test_prefer_format_order_matters():
+    struct = [_web("a.pdf", 10), _web("a.cbz", 20), _web("a.epub", 5)]
+    selected = _select(struct, prefer_format=["epub", "cbz"])
+    assert _names(selected) == ["a.epub"]
+
+
+def test_prefer_format_keeps_every_file_of_the_winning_format():
+    struct = [_web("v1.cbz", 10), _web("v2.cbz", 11), _web("all.pdf", 90)]
+    selected = _select(struct, prefer_format=["cbz", "pdf"])
+    assert _names(selected) == ["v1.cbz", "v2.cbz"]
+
+
+def test_prefer_format_falls_back_to_largest_file():
+    struct = [_web("a.cbr", 15), _web("a.djvu", 55), _web("a.txt", 1)]
+    selected = _select(struct, prefer_format=["cbz", "epub"])
+    assert _names(selected) == ["a.djvu"]
+
+
+def test_prefer_format_fallback_without_sizes_keeps_one_file():
+    struct = [_web("a.cbr"), _web("a.djvu")]
+    selected = _select(struct, prefer_format=["cbz"])
+    assert len(_names(selected)) == 1
+
+
+def test_prefer_format_leaves_single_file_alone():
+    struct = [_web("only.azw3", 5)]
+    selected = _select(struct, prefer_format=["cbz"])
+    assert _names(selected) == ["only.azw3"]
+
+
+def test_prefer_format_never_drops_entries_without_a_url():
+    external = {"external_link": "https://example.com/x"}
+    struct = [_web("a.pdf", 10), _web("a.cbz", 20), external]
+    selected = _select(struct, prefer_format=["cbz"])
+    assert external in selected
+    assert _names(selected) == ["a.cbz"]
+
+
+def test_prefer_format_respects_exclude():
+    struct = [_web("a.pdf", 10), _web("a.cbz", 20)]
+    selected = _select(struct, prefer_format=["cbz", "pdf"], ext_exclude=["cbz"])
+    assert _names(selected) == ["a.pdf"]
+
+
+def test_prefer_format_respects_include():
+    struct = [_web("a.pdf", 10), _web("a.cbz", 20), _web("a.epub", 5)]
+    selected = _select(
+        struct, prefer_format=["cbz", "epub"], ext_include=["epub", "pdf"]
+    )
+    assert _names(selected) == ["a.epub"]
+
+
+def test_prefer_format_normalises_dots_and_case():
+    struct = [_web("a.pdf", 10), _web("a.CBZ", 20)]
+    selected = _select(struct, prefer_format=[".CbZ"])
+    assert _names(selected) == ["a.CBZ"]

@@ -20,6 +20,7 @@ After that it will only download the content that has been updated or is missing
 - optional listing of the url of every file being collected _(`--print-urls` flag)_
 - optional filter by file types using an include _or_ exclude list _(`--include/--exclude` flag)_
 - optional filter by platform types like video, ebook, etc... _(`--platform` flag)_
+- optional single format per item, with an ordered preference and a largest-file fallback _(`--prefer-format` flag)_
 
 
 ## Install
@@ -102,6 +103,35 @@ another tool:
 This works during a real download too, in which case it lists each file as it is fetched.
 Note that Humble Bundle urls are signed and expire after a while, so a saved list is only good for
 a short time.
+
+
+### 5. Picking one format per item
+
+Bundles usually ship the same book or comic several times over: `.cbz`, `.epub`, `.pdf` and `.mobi`
+of the same thing. `--prefer-format` (or `-f`) keeps one format instead of all of them:
+
+`hbd --cookie-file cookies.txt --library-path "Comics" --prefer-format cbz epub pdf`
+
+The extensions are tried **in order**, so the last one you list acts as the default:
+
+1. every `.cbz` in the item, if it has any
+2. otherwise every `.epub`
+3. otherwise every `.pdf`
+4. otherwise the single largest file, whatever its format
+
+That last step is what stops an item disappearing when it ships in some format you did not think to
+list, like `.cbr` or `.djvu`.
+
+Selection happens per item **and per platform**, so a game that ships a Windows and a Linux build
+still gets one file for each, rather than one file overall.
+
+When the winning format has more than one file in an item, all of them are kept. A comic split
+into `Vol1.cbz` and `Vol2.cbz` comes down as both volumes, not just the larger one — the flag
+collapses format variants, never content.
+
+`--prefer-format` composes with the other filters, and `--include`/`--exclude` are applied first, so
+`-e cbz -f cbz epub` will never pick a `.cbz` and moves on to `.epub`. Combine it with `--dry-run`
+to see exactly which file wins for each item before downloading anything.
 
 
 ## Notes
