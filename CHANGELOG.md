@@ -3,6 +3,15 @@
 
 ## Unreleased
 
+- Downloads are now checked against the checksum the api reports, hashed as they stream so there is
+  no extra pass over the data. A file that does not match is discarded and downloaded again from
+  scratch rather than resumed, and one that never matches is left out of the library and the cache.
+  `sha1` is preferred over `md5`, the result is recorded in `.cache.json`, items with no checksum
+  are unaffected, and `--no-verify` turns it off
+- A resumed transfer now carries `If-Range`, so the server hands back the whole of a file that
+  changed rather than a slice of it. Without that, a file re-generated upstream mid-transfer had its
+  new second half stitched onto the old first half, producing a file of exactly the right length and
+  entirely the wrong contents
 - A purchase key given more than once, or returned more than once by the library page, is now used
   once. Previously the whole order was walked again, and in parallel the same file could be queued
   twice before the first copy finished, leaving two workers writing one `.part` at the same time

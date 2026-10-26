@@ -1,3 +1,5 @@
+import hashlib
+
 import os
 
 import queue
@@ -24,7 +26,12 @@ from humblebundle_downloader.download_library import (
     Interrupted,
     LibraryPathError,
     _mount_hint,
+    ChecksumMismatch,
+    _digest_of,
+    _feed_hash_from_file,
+    _struct_hashes,
     _trove_stamp,
+    _validator_for,
     _unique_keys,
     ProgressReporter,
     _coerce_size,
@@ -575,15 +582,18 @@ def _range_response(content_range, status_code=206, length=None):
 def _library_with_response(response, second=None):
     dl = DownloadLibrary("fake_library_path")
     handed = []
+    validators = []
 
-    def fake_get(remote_file, stream=True, range_start=None):
+    def fake_get(remote_file, stream=True, range_start=None, if_range=None):
         handed.append(range_start)
+        validators.append(if_range)
         if len(handed) == 1:
             return response
         return second
 
     dl._get_with_backoff = fake_get
     dl._handed = handed
+    dl._validators = validators
     return dl
 
 
@@ -1284,3 +1294,102 @@ def test_stale_temp_files_are_swept_on_load(tmp_path):
 
     names = sorted(p.name for p in tmp_path.iterdir())
     assert names == [".cache.json", "keep-me.tmp"]
+
+
+###
+# checksums and If-Range
+###
+def test_struct_hashes_picks_up_what_the_api_offers():
+    assert _struct_hashes({"sha1": "AABB", "md5": "CCDD"}) == {
+        "sha1": "aabb", "md5": "ccdd",
+    }
+    assert _struct_hashes({"md5": " ccdd "}) == {"md5": "ccdd"}
+    assert _struct_hashes({}) == {}
+    assert _struct_hashes({"sha1": "", "md5": None, "file_size": 7}) == {}
+    assert _struct_hashes({"sha1": 1234}) == {}
+
+
+def test_validator_prefers_an_etag():
+    response = type("R", (), {"headers": {
+        "ETag": '"abc"', "Last-Modified": "Mon, 01 Jan 2024 00:00:00 GMT",
+    }})()
+    assert _validator_for(response) == '"abc"'
+
+
+def test_validator_falls_back_to_last_modified():
+    response = type("R", (), {"headers": {
+        "Last-Modified": "Mon, 01 Jan 2024 00:00:00 GMT",
+    }})()
+    assert _validator_for(response) == "Mon, 01 Jan 2024 00:00:00 GMT"
+
+
+def test_validator_is_none_when_there_is_nothing_to_go_on():
+    assert _validator_for(type("R", (), {"headers": {}})()) is None
+    assert _validator_for(object()) is None
+
+
+def test_strongest_available_algorithm_is_used():
+    dl = DownloadLibrary("x")
+    assert dl._hash_algorithm({"sha1": "a", "md5": "b"}) == "sha1"
+    assert dl._hash_algorithm({"md5": "b"}) == "md5"
+    assert dl._hash_algorithm({}) is None
+    assert dl._hash_algorithm(None) is None
+
+
+def test_no_verify_turns_checking_off():
+    dl = DownloadLibrary("x", verify=False)
+    assert dl._hash_algorithm({"sha1": "a"}) is None
+
+
+def test_digest_of_reports_what_was_computed():
+    hasher = hashlib.sha1(b"hello")
+    assert _digest_of("sha1", hasher) == {"sha1": hasher.hexdigest()}
+    assert _digest_of(None, None) == {}
+    assert _digest_of("sha1", None) == {}
+
+
+def test_a_matching_digest_passes():
+    hasher = hashlib.sha1(b"hello")
+    DownloadLibrary._check_digest(
+        "sha1", hasher, {"sha1": hasher.hexdigest().upper()}, "f.cbz"
+    )
+
+
+def test_a_mismatched_digest_raises():
+    hasher = hashlib.sha1(b"hello")
+    with pytest.raises(ChecksumMismatch) as raised:
+        DownloadLibrary._check_digest(
+            "sha1", hasher, {"sha1": "0" * 40}, "f.cbz"
+        )
+    assert "f.cbz" in str(raised.value)
+
+
+def test_nothing_to_check_against_is_not_a_failure():
+    DownloadLibrary._check_digest("sha1", hashlib.sha1(b"x"), {}, "f.cbz")
+    DownloadLibrary._check_digest("sha1", None, {"sha1": "0" * 40}, "f.cbz")
+
+
+def test_hashing_an_existing_part_file(tmp_path):
+    part = tmp_path / "f.part"
+    part.write_bytes(b"first half ")
+    hasher = hashlib.sha1()
+    _feed_hash_from_file(hasher, str(part))
+    hasher.update(b"second half")
+    assert hasher.hexdigest() == hashlib.sha1(
+        b"first half second half"
+    ).hexdigest()
+
+
+def test_a_resume_asks_only_for_this_version_of_the_file():
+    response = _range_response("bytes 500-999/1000", 206, length=500)
+    dl = _library_with_response(response)
+    dl._reopen_for_resume("https://x/y.bin", "y.part", 500, '"v1"')
+    assert dl._validators == ['"v1"']
+
+
+def test_a_fresh_request_carries_no_validator():
+    fresh = _range_response(None, 200, length=1000)
+    dl = _library_with_response(_range_response(None, 416), second=fresh)
+    dl._reopen_for_resume("https://x/y.bin", "y.part", 500, '"v1"')
+    # The range attempt carries it, the clean restart after 416 does not
+    assert dl._validators == ['"v1"', None]

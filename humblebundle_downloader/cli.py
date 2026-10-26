@@ -99,6 +99,14 @@ def parse_args(args):
         ),
     )
     parser.add_argument(
+        "--no-verify",
+        action="store_true",
+        help=(
+            "Do not check downloaded files against the checksum the api "
+            "reports. Files with no checksum are unaffected either way"
+        ),
+    )
+    parser.add_argument(
         "--no-parallel",
         action="store_true",
         help=(
@@ -201,6 +209,7 @@ def cli():
             progress_style=cli_args.progress_style,
             jobs=jobs,
             retries=cli_args.retries,
+            verify=not cli_args.no_verify,
         ).start()
     except LibraryPathError as error:
         # Nothing to retry and nothing to show a traceback for: the

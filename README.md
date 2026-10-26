@@ -208,8 +208,31 @@ that is noted once in the log. Either way the file you end up with is correct. R
 `--retries` apply here too, so a large file that keeps dropping is retried rather than abandoned on
 the first stumble.
 
+The resume also carries `If-Range`, holding the `ETag` or `Last-Modified` of the response the
+transfer started from. That asks the server for the rest of **this** file rather than the rest of
+whatever is at that url now, and a server that notices the difference answers with the whole of the
+new file instead of a slice of it. Without that, a file re-generated upstream mid-transfer would
+have its new second half stitched onto the old first half, giving a file of exactly the right
+length and entirely the wrong contents.
 
-### 6. Picking one format per item
+
+### 6. Checking what arrived
+
+Humble reports a checksum for most files. Each download is hashed as it streams past, costing no
+extra pass over the data, and checked against what was promised. A file that does not match is not
+kept: the partial file is discarded and it is downloaded again from scratch rather than resumed,
+since resuming would keep the bad bytes. `--retries` governs how many attempts it gets, and a file
+that never matches is left out of the library and out of the cache, so the next run tries again.
+
+`sha1` is used when it is offered and `md5` otherwise, and the result is recorded in `.cache.json`
+so a later run can tell a file that changed on disk from one that changed upstream. Items the api
+gives no checksum for are downloaded and kept exactly as before.
+
+This is the backstop for the resume case above: `If-Range` is what prevents a mismatched splice,
+and the checksum is what catches one if a server ignores it. `--no-verify` turns the checking off.
+
+
+### 7. Picking one format per item
 
 Bundles usually ship the same book or comic several times over: `.cbz`, `.epub`, `.pdf` and `.mobi`
 of the same thing. `--prefer-format` (or `-f`) keeps one format instead of all of them:

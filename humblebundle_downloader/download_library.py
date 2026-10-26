@@ -6,6 +6,7 @@ import email
 import queue
 import parsel
 import shutil
+import hashlib
 import tempfile
 import signal
 import logging
@@ -40,12 +41,65 @@ class Interrupted(Exception):
     """
 
 
+class ChecksumMismatch(Exception):
+    """What arrived is not what the api said it would be.
+
+    Resuming would keep the bad bytes, so this always restarts the file
+    from nothing rather than picking it back up.
+    """
+
+
 class LibraryPathError(Exception):
     """The library path cannot be written to.
 
     Nothing is worth attempting until it can, so this is raised before
     the run starts rather than discovered one file at a time.
     """
+
+
+def _struct_hashes(entry):
+    """Checksums the api offers for a file, strongest first.
+
+    Everything is optional: entries without one are downloaded and kept
+    exactly as before.
+    """
+    found = {}
+    for name in ("sha1", "md5"):
+        value = entry.get(name)
+        if isinstance(value, str) and value.strip():
+            found[name] = value.strip().lower()
+    return found
+
+
+def _validator_for(response):
+    """What If-Range should carry, so the server can tell us the file
+    changed rather than handing back a slice of a different one
+    """
+    try:
+        headers = response.headers
+    except Exception:
+        return None
+    for name in ("ETag", "Last-Modified"):
+        value = headers.get(name)
+        if value:
+            return value
+    return None
+
+
+def _digest_of(algorithm, hasher):
+    """What was computed, ready to record in the cache"""
+    if hasher is None or algorithm is None:
+        return {}
+    return {algorithm: hasher.hexdigest()}
+
+
+def _feed_hash_from_file(hasher, path):
+    """Re-read what is already on disk so a resumed transfer's hash
+    covers the whole file, not just the part that arrived this time
+    """
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 256), b""):
+            hasher.update(block)
 
 
 def _trove_stamp(raw):
@@ -640,11 +694,14 @@ class DownloadLibrary:
         print_urls=False,
         jobs=1,
         retries=5,
+        verify=True,
         progress_style=DEFAULT_PROGRESS_STYLE,
     ):
         self.library_path = library_path
         self.jobs = max(1, int(jobs))
         self.retries = max(0, int(retries))
+        # Checked against what the api says, when it says anything
+        self.verify = verify
         self.progress_bar = progress_bar
         # Several \r progress bars writing at once is unreadable, so the
         # per-file bar is for sequential runs. In parallel one reporter
@@ -1215,6 +1272,7 @@ class DownloadLibrary:
                     local_filename,
                     rename_str=uploaded_at,
                     remote_file=signed_url,
+                    hashes=_struct_hashes(download),
                 )
 
     def _get_trove_products(self):
@@ -1415,6 +1473,7 @@ class DownloadLibrary:
                                 product_folder,
                                 url_filename,
                                 file_size=_coerce_size(file_type.get("file_size")),
+                                hashes=_struct_hashes(file_type),
                             )
                         except FileExistsError:
                             continue
@@ -1773,6 +1832,7 @@ class DownloadLibrary:
         local_filename,
         file_size=None,
         synchronous=False,
+        hashes=None,
     ):
         cache_file_info = self.cache_data.get(cache_file_key, {})
 
@@ -1804,6 +1864,7 @@ class DownloadLibrary:
             "local_folder": local_folder,
             "local_filename": local_filename,
             "cache_file_info": cache_file_info,
+            "hashes": hashes or {},
         }
 
         if self._progress is not None:
@@ -1872,7 +1933,8 @@ class DownloadLibrary:
         if not os.path.isdir(self.library_path):
             self._library_vanished()
 
-    def _get_with_backoff(self, remote_file, stream=True, range_start=None):
+    def _get_with_backoff(self, remote_file, stream=True, range_start=None,
+                          if_range=None):
         """GET that honours the pool wide cooldown and handles a 429.
 
         Connection errors and 5xx are retried inside the session's
@@ -1881,10 +1943,16 @@ class DownloadLibrary:
 
         range_start asks the server to resume from that byte. Whether it
         agrees is its business: the caller checks the status code.
+
+        if_range carries the validator from the first response, so that
+        a file which changed underneath us comes back whole, as a 200,
+        instead of a slice that would be spliced onto the wrong bytes.
         """
         headers = None
         if range_start:
             headers = {"Range": "bytes={start}-".format(start=range_start)}
+            if if_range:
+                headers["If-Range"] = if_range
 
         for _ in range(self.retries + 1):
             self._wait_out_cooldown()
@@ -1986,6 +2054,7 @@ class DownloadLibrary:
             local_file,
             rename_str=last_modified,
             remote_file=remote_file,
+            hashes=job.get("hashes"),
         )
 
     def _process_download(
@@ -1996,6 +2065,7 @@ class DownloadLibrary:
         local_filename,
         rename_str=None,
         remote_file=None,
+        hashes=None,
     ):
         started = time.time()
         # Content lands in <file>.part and is only moved into place once
@@ -2008,9 +2078,12 @@ class DownloadLibrary:
             if rename_str:
                 self._rename_old_file(local_filename, rename_str)
 
-            written = self._download_to_part(
-                open_r, part_file, remote_file, local_filename
+            written, digests = self._download_to_part(
+                open_r, part_file, remote_file, local_filename, hashes
             )
+            # Recorded so a later run can tell a file that changed on
+            # disk from one that changed upstream
+            file_info.update(digests)
             os.replace(part_file, local_filename)
 
         except (Exception, KeyboardInterrupt) as e:
@@ -2092,11 +2165,25 @@ class DownloadLibrary:
             )
         )
 
-    def _download_to_part(self, response, part_file, remote_file, local_filename):
+    def _hash_algorithm(self, hashes):
+        """Strongest checksum the api gave us that we can actually use"""
+        if not self.verify or not hashes:
+            return None
+        for name in ("sha1", "md5"):
+            if hashes.get(name):
+                try:
+                    hashlib.new(name)
+                except ValueError:
+                    continue
+                return name
+        return None
+
+    def _download_to_part(self, response, part_file, remote_file,
+                          local_filename, hashes=None):
         """Stream into the part file, picking the transfer back up where
         it broke off when the server allows it.
 
-        Returns the size of the finished part file.
+        Returns (size of the finished file, checksums computed for it).
         """
         logger.info(
             "Downloading: {local_filename}".format(local_filename=local_filename)
@@ -2108,21 +2195,38 @@ class DownloadLibrary:
         attempt = 0
         label = os.path.basename(local_filename)
 
+        # Taken from the first response, so a resume can ask for the
+        # rest of *this* file rather than a slice of whatever is there
+        # now. Hashing happens as the bytes go past, costing a pass over
+        # data we are already walking
+        validator = _validator_for(response)
+        algorithm = self._hash_algorithm(hashes)
+        hasher = hashlib.new(algorithm) if algorithm else None
+
         if self._progress is not None:
             self._progress.file_started(label, total)
 
         while True:
             try:
                 self._stream_to_file(
-                    response, part_file, append, already, total, label
+                    response, part_file, append, already, total, label, hasher
                 )
-                return _file_size(part_file)
+                self._check_digest(algorithm, hasher, hashes, label)
+                return _file_size(part_file), _digest_of(algorithm, hasher)
             except (KeyboardInterrupt, Interrupted):
                 # Shutting down: nothing to resume, nothing to report
                 raise
             except Exception as error:
                 attempt += 1
-                already = _file_size(part_file)
+                spoiled = isinstance(error, ChecksumMismatch)
+                if spoiled:
+                    # The bytes on disk are wrong, so there is nothing
+                    # worth resuming onto
+                    _remove_quietly(part_file)
+                    already = 0
+                else:
+                    already = _file_size(part_file)
+
                 if (
                     remote_file is None
                     or attempt > self.retries
@@ -2131,39 +2235,67 @@ class DownloadLibrary:
                     raise
 
                 logger.warning(
-                    "{name} stopped after {size} ({error}), picking it "
-                    "back up".format(
-                        name=os.path.basename(local_filename),
-                        size=_human_size(already),
+                    "{name} {what} ({error}), {action}".format(
+                        name=label,
+                        what="is not what was promised" if spoiled
+                        else "stopped after " + _human_size(already),
                         error=error,
+                        action="downloading it again" if spoiled
+                        else "picking it back up",
                     )
                 )
 
                 resumed = self._reopen_for_resume(
-                    remote_file, part_file, already
+                    remote_file, part_file, already, validator
                 )
                 if resumed is None:
                     raise
                 response, append, total = resumed
                 if append is False:
                     already = 0
+
+                # Whatever the server decided, the hash has to cover
+                # exactly what ends up in the file
+                if hasher is not None:
+                    hasher = hashlib.new(algorithm)
+                    if append and already:
+                        _feed_hash_from_file(hasher, part_file)
+                validator = _validator_for(response) or validator
+
                 if self._progress is not None:
                     # A resume changes what the whole file weighs
                     self._progress.file_started(label, total)
                     self._progress.file_progress(label, already)
 
-    def _reopen_for_resume(self, remote_file, part_file, already):
+    @staticmethod
+    def _check_digest(algorithm, hasher, hashes, label):
+        if hasher is None:
+            return
+        expected = (hashes or {}).get(algorithm, "").lower()
+        actual = hasher.hexdigest().lower()
+        if expected and actual != expected:
+            raise ChecksumMismatch(
+                "{algorithm} of {label} is {actual}, expected "
+                "{expected}".format(
+                    algorithm=algorithm, label=label,
+                    actual=actual, expected=expected,
+                )
+            )
+
+    def _reopen_for_resume(self, remote_file, part_file, already,
+                           validator=None):
         """Ask for the rest of the file.
 
         The server decides whether that is possible, and we believe the
         status code rather than assuming support: 206 means the Range was
-        honoured and we append, 200 means it was ignored and the file
-        starts again from nothing.
+        honoured and we append, 200 means it was ignored, or the file
+        changed since If-Range was taken, and it starts again from
+        nothing.
 
         Returns (response, append, total), or None if it cannot go on.
         """
         response = self._get_with_backoff(
-            remote_file, range_start=already or None
+            remote_file, range_start=already or None, if_range=validator
         )
         if response is None:
             return None
@@ -2193,7 +2325,21 @@ class DownloadLibrary:
             )
 
         if status == 200:
-            self._note_range_unsupported()
+            if not already:
+                # We asked for the whole file on purpose, so there is
+                # nothing surprising to report
+                pass
+            elif validator:
+                # We asked for the rest only if the file was unchanged,
+                # and got the whole thing, so it changed underneath us
+                logger.info(
+                    "{name} changed on the server, taking it from the "
+                    "top".format(
+                        name=os.path.basename(part_file).replace(".part", "")
+                    )
+                )
+            else:
+                self._note_range_unsupported()
             return (
                 response,
                 False,
@@ -2214,7 +2360,8 @@ class DownloadLibrary:
         )
 
     def _stream_to_file(
-        self, response, part_file, append, already, total, label=None
+        self, response, part_file, append, already, total, label=None,
+        hasher=None,
     ):
         """One pass of the transfer. `already` is what the part file
         holds when appending, so the progress bar counts the whole file
@@ -2228,6 +2375,8 @@ class DownloadLibrary:
                     raise Interrupted()
                 written += len(data)
                 outfile.write(data)
+                if hasher is not None:
+                    hasher.update(data)
                 if self._show_bar:
                     self._draw_bar(written, total)
                 elif self._progress is not None and label is not None:
