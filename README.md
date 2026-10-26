@@ -66,6 +66,16 @@ _If using the docker image, exclude the `hbd` part of the command_
 This directory structure will be used:  
 `Downloaded Library/Purchase Name/Item Name/downloaded_file.ext`
 
+The library path is checked before anything else happens. If it does not exist it is created; if it
+cannot be created or written to, the run stops right there with one line saying why, rather than
+reaching the network and then failing once per file hundreds of files later. Paths under
+`/Volumes`, `/media`, `/mnt` and `/run/media` get a reminder to check the drive is mounted, since
+that is usually what has gone wrong.
+
+That check is repeated cheaply as the run goes: if the library folder disappears mid-run, which on
+an external or network drive means it was unmounted, the run stops instead of quietly rebuilding
+the folder tree inside the empty mountpoint and filling your boot disk.
+
 
 ### 3. Checking the size before downloading
 

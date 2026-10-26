@@ -39,6 +39,26 @@ class Interrupted(Exception):
     """
 
 
+class LibraryPathError(Exception):
+    """The library path cannot be written to.
+
+    Nothing is worth attempting until it can, so this is raised before
+    the run starts rather than discovered one file at a time.
+    """
+
+
+def _mount_hint(path):
+    """Why a path might be missing, for the error message"""
+    absolute = os.path.abspath(path)
+    for mount_root in ("/Volumes/", "/media/", "/mnt/", "/run/media/"):
+        if absolute.startswith(mount_root):
+            return "is the drive plugged in and mounted?"
+    parent = os.path.dirname(absolute)
+    if parent and not os.path.exists(parent):
+        return "{parent} does not exist either".format(parent=parent)
+    return None
+
+
 def _package_version():
     try:
         from importlib.metadata import version
@@ -625,6 +645,10 @@ class DownloadLibrary:
 
         self._notice_lock = threading.Lock()
         self._range_unsupported = False
+        # Set by a worker when something has gone wrong that every
+        # remaining file would hit too, so the run stops rather than
+        # repeating the same error once per file
+        self._fatal = None
 
         self.ext_include = (
             [] if ext_include is None else list(map(str.lower, ext_include))
@@ -674,7 +698,71 @@ class DownloadLibrary:
                 {"cookie": "_simpleauth_sess={}".format(cookie_auth)}
             )
 
+    def _can_write(self, path):
+        """Actually write something, rather than ask about permissions.
+
+        os.access answers from the posix bits, which network shares,
+        read only mounts and macOS access controls can all disagree with
+        """
+        probe = os.path.join(path, ".hbd-write-check")
+        try:
+            with open(probe, "w"):
+                pass
+        except OSError:
+            return False
+        finally:
+            _remove_quietly(probe)
+        return True
+
+    def _check_library_path(self):
+        """Confirm the library is usable before going near the network.
+
+        Without this the first sign of trouble is an error from a worker
+        thread, a few hundred files into a run, repeated once per file.
+        """
+        path = self.library_path
+        shown = os.path.abspath(path)
+
+        if os.path.exists(path) and not os.path.isdir(path):
+            raise LibraryPathError(
+                "Library path is not a folder: {shown}".format(shown=shown)
+            )
+
+        if not os.path.isdir(path):
+            if self.dry_run is True:
+                # A dry run writes nothing, so this is worth saying but
+                # not worth stopping for
+                logger.warning(
+                    "Library path does not exist yet: {shown}".format(shown=shown)
+                )
+                return
+            try:
+                os.makedirs(path, exist_ok=True)
+            except OSError as error:
+                raise LibraryPathError(
+                    self._path_problem(shown, error.strerror or error)
+                )
+            logger.info("Created library folder {shown}".format(shown=shown))
+            return
+
+        if self.dry_run is not True and not self._can_write(path):
+            raise LibraryPathError(
+                self._path_problem(shown, "cannot write to it")
+            )
+
+    @staticmethod
+    def _path_problem(shown, reason):
+        message = "Cannot use library path {shown}: {reason}".format(
+            shown=shown, reason=reason
+        )
+        hint = _mount_hint(shown)
+        if hint:
+            message += " ({hint})".format(hint=hint)
+        return message
+
     def start(self):
+        self._check_library_path()
+
         self.cache_file = os.path.join(self.library_path, ".cache.json")
         self.cache_data = self._load_cache_data(self.cache_file)
         self.purchase_keys = (
@@ -693,10 +781,16 @@ class DownloadLibrary:
                     logger.info("Only checking the Humble Trove...")
                     self._current_bundle = "Humble Trove"
                     for product in self._get_trove_products():
+                        if self._stop.is_set():
+                            break
                         title = _clean_name(product["human-name"])
                         self._process_trove_product(title, product)
                 else:
                     for order_id in self.purchase_keys:
+                        if self._stop.is_set():
+                            # Interrupted, or something a worker found
+                            # that the rest of the run would hit too
+                            break
                         self._process_order_id(order_id)
 
                 if self._progress is not None:
@@ -705,6 +799,9 @@ class DownloadLibrary:
                     self._progress.traversal_finished()
 
                 self._stop_workers()
+
+                if self._fatal:
+                    raise LibraryPathError(self._fatal)
 
                 if self._stop.is_set():
                     # A sequential transfer was interrupted
@@ -1662,6 +1759,33 @@ class DownloadLibrary:
         if self._progress is not None:
             self._progress.file_skipped()
 
+    def _library_vanished(self):
+        """The library root is no longer there.
+
+        Every remaining file would hit this, so stop the run rather than
+        say the same thing several hundred times
+        """
+        if self._fatal:
+            return
+        self._fatal = self._path_problem(
+            os.path.abspath(self.library_path),
+            "it went away while the run was going",
+        )
+        self._stop.set()
+
+    def _folder_unusable(self, local_file, error):
+        """Could not make somewhere to put a file"""
+        self._note_skip()
+        logger.error(
+            "Cannot create a folder for {name}: {reason}".format(
+                name=os.path.basename(local_file),
+                reason=error.strerror or error,
+            )
+        )
+
+        if not os.path.isdir(self.library_path):
+            self._library_vanished()
+
     def _get_with_backoff(self, remote_file, stream=True, range_start=None):
         """GET that honours the pool wide cooldown and handles a 429.
 
@@ -1753,11 +1877,21 @@ class DownloadLibrary:
             last_modified = None
 
         local_file = os.path.join(local_folder, local_filename)
+        # The library root going missing mid run usually means a drive
+        # was unmounted. makedirs below would cheerfully rebuild the
+        # tree inside the empty mountpoint and fill the boot disk
+        # instead, so check before writing rather than after
+        if not os.path.isdir(self.library_path):
+            self._note_skip()
+            self._library_vanished()
+            return False
+
         # Create directory to save the file to, which might not exist if there's a subdirectory included
         try:
             os.makedirs(os.path.dirname(local_file), exist_ok=True)  # noqa: E701
-        except OSError:
-            raise  # noqa: E701
+        except OSError as error:
+            self._folder_unusable(local_file, error)
+            return False
 
         self._log_url(remote_file)
 

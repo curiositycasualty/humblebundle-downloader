@@ -181,23 +181,28 @@ def cli():
 
     jobs = resolve_jobs(cli_args)
 
-    from .download_library import DownloadLibrary
+    from .download_library import DownloadLibrary, LibraryPathError
 
-    DownloadLibrary(
-        cli_args.library_path,
-        cookie_path=cli_args.cookie_file,
-        cookie_auth=cli_args.session_auth,
-        progress_bar=cli_args.progress,
-        ext_include=cli_args.include,
-        ext_exclude=cli_args.exclude,
-        platform_include=cli_args.platform,
-        prefer_format=cli_args.prefer_format,
-        purchase_keys=cli_args.keys,
-        trove=cli_args.trove,
-        update=cli_args.update,
-        dry_run=cli_args.dry_run,
-        print_urls=cli_args.print_urls,
-        progress_style=cli_args.progress_style,
-        jobs=jobs,
-        retries=cli_args.retries,
-    ).start()
+    try:
+        DownloadLibrary(
+            cli_args.library_path,
+            cookie_path=cli_args.cookie_file,
+            cookie_auth=cli_args.session_auth,
+            progress_bar=cli_args.progress,
+            ext_include=cli_args.include,
+            ext_exclude=cli_args.exclude,
+            platform_include=cli_args.platform,
+            prefer_format=cli_args.prefer_format,
+            purchase_keys=cli_args.keys,
+            trove=cli_args.trove,
+            update=cli_args.update,
+            dry_run=cli_args.dry_run,
+            print_urls=cli_args.print_urls,
+            progress_style=cli_args.progress_style,
+            jobs=jobs,
+            retries=cli_args.retries,
+        ).start()
+    except LibraryPathError as error:
+        # Nothing to retry and nothing to show a traceback for: the
+        # path is wrong, and the message says how
+        sys.exit(str(error))

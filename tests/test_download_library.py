@@ -22,6 +22,8 @@ import threading
 from humblebundle_downloader.download_library import (
     DownloadLibrary,
     Interrupted,
+    LibraryPathError,
+    _mount_hint,
     ProgressReporter,
     _coerce_size,
     _file_ext,
@@ -989,3 +991,105 @@ def test_second_interrupt_exits_hard():
         assert forced == [True]
     finally:
         dl._restore_interrupt_handler(previous)
+
+
+###
+# library path checks
+###
+def test_missing_library_path_is_created(tmp_path):
+    target = tmp_path / "nested" / "Library"
+    dl = DownloadLibrary(str(target))
+    dl._check_library_path()
+    assert target.is_dir()
+
+
+def test_dry_run_does_not_create_the_library_path(tmp_path):
+    target = tmp_path / "never"
+    dl = DownloadLibrary(str(target), dry_run=True)
+    dl._check_library_path()
+    assert not target.exists()
+
+
+def test_library_path_that_is_a_file_is_refused(tmp_path):
+    blocker = tmp_path / "a-file"
+    blocker.write_text("not a folder")
+    dl = DownloadLibrary(str(blocker))
+    with pytest.raises(LibraryPathError) as raised:
+        dl._check_library_path()
+    assert "not a folder" in str(raised.value)
+
+
+def test_library_path_that_cannot_be_created_is_refused(tmp_path):
+    blocker = tmp_path / "a-file"
+    blocker.write_text("not a folder")
+    dl = DownloadLibrary(str(blocker / "Library"))
+    with pytest.raises(LibraryPathError) as raised:
+        dl._check_library_path()
+    assert "Cannot use library path" in str(raised.value)
+
+
+def test_library_path_that_cannot_be_written_to_is_refused(tmp_path):
+    dl = DownloadLibrary(str(tmp_path))
+    dl._can_write = lambda path: False
+    with pytest.raises(LibraryPathError) as raised:
+        dl._check_library_path()
+    assert "cannot write to it" in str(raised.value)
+
+
+def test_dry_run_tolerates_an_unwritable_library_path(tmp_path):
+    dl = DownloadLibrary(str(tmp_path), dry_run=True)
+    dl._can_write = lambda path: False
+    dl._check_library_path()
+
+
+def test_can_write_cleans_up_after_itself(tmp_path):
+    dl = DownloadLibrary(str(tmp_path))
+    assert dl._can_write(str(tmp_path)) is True
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_can_write_is_false_for_somewhere_that_is_not_there(tmp_path):
+    dl = DownloadLibrary(str(tmp_path))
+    assert dl._can_write(str(tmp_path / "nope")) is False
+
+
+def test_start_checks_the_path_before_anything_else(tmp_path):
+    blocker = tmp_path / "a-file"
+    blocker.write_text("not a folder")
+
+    class Exploding:
+        headers = {}
+        cookies = {}
+
+        def get(self, url, **kwargs):
+            raise AssertionError("the network was touched: " + url)
+
+    dl = DownloadLibrary(str(blocker), purchase_keys=["k"])
+    dl.session = Exploding()
+    with pytest.raises(LibraryPathError):
+        dl.start()
+
+
+def test_mount_hint_for_removable_media():
+    for path in ("/Volumes/Books/x", "/media/pag/usb/x", "/mnt/nas/x",
+                 "/run/media/pag/disk/x"):
+        assert "mounted" in _mount_hint(path)
+
+
+def test_mount_hint_for_a_missing_parent(tmp_path):
+    hint = _mount_hint(str(tmp_path / "missing" / "Library"))
+    assert "does not exist either" in hint
+
+
+def test_mount_hint_stays_quiet_when_it_has_nothing_to_add(tmp_path):
+    assert _mount_hint(str(tmp_path / "Library")) is None
+
+
+def test_library_vanishing_stops_the_run_once(tmp_path):
+    dl = DownloadLibrary(str(tmp_path / "gone"))
+    dl._library_vanished()
+    first = dl._fatal
+    assert "went away" in first
+    assert dl._stop.is_set()
+    dl._library_vanished()
+    assert dl._fatal == first, "the reason should not be rewritten"

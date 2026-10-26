@@ -3,6 +3,12 @@
 
 ## Unreleased
 
+- The library path is now checked before the run starts: created if missing, and refused with one
+  clear line if it cannot be created or written to. Previously an unusable path was first noticed
+  by a worker thread partway through a run, as a traceback repeated once per file
+- A library folder that disappears mid-run, which on an external or network drive means it was
+  unmounted, now stops the run. `os.makedirs` would otherwise rebuild the folder tree inside the
+  empty mountpoint and fill the boot disk instead
 - Added `--dry-run`/`-n` to report the number of files and total size of a download before
   downloading anything, broken down per bundle
 - Added `--print-urls` to print the url of each file being collected to stdout, one per line
