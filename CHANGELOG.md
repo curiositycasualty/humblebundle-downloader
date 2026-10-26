@@ -3,6 +3,9 @@
 
 ## Unreleased
 
+- A purchase key given more than once, or returned more than once by the library page, is now used
+  once. Previously the whole order was walked again, and in parallel the same file could be queued
+  twice before the first copy finished, leaving two workers writing one `.part` at the same time
 - The library path is now checked before the run starts: created if missing, and refused with one
   clear line if it cannot be created or written to. Previously an unusable path was first noticed
   by a worker thread partway through a run, as a traceback repeated once per file

@@ -47,6 +47,18 @@ class LibraryPathError(Exception):
     """
 
 
+def _unique_keys(keys):
+    """Keep the first of each key, in the order they were given"""
+    seen = set()
+    unique = []
+    for key in keys:
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(key)
+    return unique
+
+
 def _mount_hint(path):
     """Why a path might be missing, for the error message"""
     absolute = os.path.abspath(path)
@@ -650,6 +662,12 @@ class DownloadLibrary:
         # repeating the same error once per file
         self._fatal = None
 
+        # Destinations already handed out this run. A repeated purchase
+        # key would otherwise queue the same file twice, and in parallel
+        # that means two workers writing one .part at the same time
+        self._claimed = set()
+        self._claim_lock = threading.Lock()
+
         self.ext_include = (
             [] if ext_include is None else list(map(str.lower, ext_include))
         )
@@ -768,6 +786,7 @@ class DownloadLibrary:
         self.purchase_keys = (
             self.purchase_keys if self.purchase_keys else self._get_purchase_keys()
         )
+        self.purchase_keys = self._dedupe_keys(self.purchase_keys)
 
         previous_handler = self._install_interrupt_handler()
         try:
@@ -1726,10 +1745,19 @@ class DownloadLibrary:
             # Do not care about checking for updates at this time
             raise FileExistsError
 
+        local_file = os.path.join(local_folder, local_filename)
+        if not self._claim(local_file):
+            logger.debug(
+                "Already handled {local_file} this run".format(
+                    local_file=local_file
+                )
+            )
+            raise FileExistsError
+
         if self.dry_run is True:
             self._check_pending_download(
                 remote_file,
-                os.path.join(local_folder, local_filename),
+                local_file,
                 file_size,
                 cache_file_info,
             )
@@ -1753,6 +1781,29 @@ class DownloadLibrary:
             return False
 
         return self._run_download_job(job)
+
+    def _claim(self, local_file):
+        """First caller to ask for a destination gets it.
+
+        Two jobs writing the same file would interleave into one .part
+        and produce something corrupt that looks finished
+        """
+        with self._claim_lock:
+            if local_file in self._claimed:
+                return False
+            self._claimed.add(local_file)
+            return True
+
+    def _dedupe_keys(self, keys):
+        unique = _unique_keys(keys)
+        repeated = len(keys) - len(unique)
+        if repeated:
+            logger.info(
+                "Ignoring {repeated} repeated purchase key(s)".format(
+                    repeated=repeated
+                )
+            )
+        return unique
 
     def _note_skip(self):
         """Queued, then turned out not to need downloading"""

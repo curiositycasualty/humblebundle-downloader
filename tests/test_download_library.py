@@ -24,6 +24,7 @@ from humblebundle_downloader.download_library import (
     Interrupted,
     LibraryPathError,
     _mount_hint,
+    _unique_keys,
     ProgressReporter,
     _coerce_size,
     _file_ext,
@@ -1093,3 +1094,64 @@ def test_library_vanishing_stops_the_run_once(tmp_path):
     assert dl._stop.is_set()
     dl._library_vanished()
     assert dl._fatal == first, "the reason should not be rewritten"
+
+
+###
+# repeated purchase keys
+###
+def test_unique_keys_keeps_the_first_of_each_in_order():
+    assert _unique_keys(["b", "a", "b", "c", "a"]) == ["b", "a", "c"]
+    assert _unique_keys([]) == []
+    assert _unique_keys(["x"]) == ["x"]
+
+
+def test_dedupe_keys_says_how_many_it_dropped(caplog):
+    dl = DownloadLibrary("fake_library_path")
+    with caplog.at_level(logging.INFO):
+        assert dl._dedupe_keys(["k", "k", "j", "k"]) == ["k", "j"]
+    assert "2 repeated purchase key" in caplog.text
+
+
+def test_dedupe_keys_is_quiet_when_there_is_nothing_to_drop(caplog):
+    dl = DownloadLibrary("fake_library_path")
+    with caplog.at_level(logging.INFO):
+        assert dl._dedupe_keys(["k", "j"]) == ["k", "j"]
+    assert "repeated" not in caplog.text
+
+
+def test_a_destination_can_only_be_claimed_once():
+    dl = DownloadLibrary("fake_library_path")
+    assert dl._claim("/library/Bundle/Item/one.cbz") is True
+    assert dl._claim("/library/Bundle/Item/one.cbz") is False
+    assert dl._claim("/library/Bundle/Item/two.cbz") is True
+
+
+def test_second_attempt_at_a_destination_is_refused(tmp_path):
+    dl = DownloadLibrary(str(tmp_path), dry_run=True)
+    dl.cache_data = {}
+
+    first = dl._check_cache_and_download(
+        "key:one.cbz", "https://dl/one.cbz", str(tmp_path), "one.cbz",
+        file_size=10,
+    )
+    assert first is False
+    assert len(dl.pending_downloads) == 1
+
+    # Same destination again, as a repeated purchase key would produce
+    with pytest.raises(FileExistsError):
+        dl._check_cache_and_download(
+            "key:one.cbz", "https://dl/one.cbz", str(tmp_path), "one.cbz",
+            file_size=10,
+        )
+    assert len(dl.pending_downloads) == 1, "counted the same file twice"
+
+
+def test_different_destinations_are_both_allowed(tmp_path):
+    dl = DownloadLibrary(str(tmp_path), dry_run=True)
+    dl.cache_data = {}
+    for name in ("one.cbz", "two.cbz"):
+        dl._check_cache_and_download(
+            "key:" + name, "https://dl/" + name, str(tmp_path), name,
+            file_size=10,
+        )
+    assert len(dl.pending_downloads) == 2

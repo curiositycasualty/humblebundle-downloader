@@ -248,3 +248,5 @@ to see exactly which file wins for each item before downloading anything.
 - Download select bundles by using the `-k` or `--keys` flag.
   Find these keys by going to your _Purchases_ section,
   click on a products and there should be a `downloads?key=XXXX` in the url.
+  A key given more than once is only used once, and the same goes for duplicates coming back from
+  your own library page, so nothing is fetched or downloaded twice.
