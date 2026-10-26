@@ -697,12 +697,15 @@ class DownloadLibrary:
         verify=True,
         progress_style=DEFAULT_PROGRESS_STYLE,
         shutdown_grace=None,
+        log_skipped=True,
     ):
         self.library_path = library_path
         self.jobs = max(1, int(jobs))
         self.retries = max(0, int(retries))
         # Checked against what the api says, when it says anything
         self.verify = verify
+        # Whether every file a filter passes over is announced
+        self.log_skipped = log_skipped
         # How long a first Ctrl-C waits for transfers in flight. Read
         # from the module default when not given, so it stays one place
         # to change for anyone embedding this
@@ -1198,7 +1201,7 @@ class DownloadLibrary:
             # Only the windows file has a dir like
             # "revolutionsoftware/BS5_v2.2.1-win32.zip"
             if self._should_download_platform(platform) is False:
-                logger.info(
+                self._log_skip(
                     "Skipping {platform} for {product_title}".format(
                         platform=platform, product_title=title
                     )
@@ -1423,7 +1426,7 @@ class DownloadLibrary:
             reason = "no preferred format available, taking the largest file"
         else:
             reason = "preferring {wanted}".format(wanted=wanted)
-        logger.info(
+        self._log_skip(
             "{product_title} [{platform}]: {reason}, skipping {dropped}".format(
                 product_title=product_title,
                 platform=platform,
@@ -1437,7 +1440,7 @@ class DownloadLibrary:
         # Get all types of download for a product
         for download_type in product["downloads"]:
             if self._should_download_platform(download_type["platform"]) is False:
-                logger.info(
+                self._log_skip(
                     "Skipping {platform} for {product_title}".format(
                         platform=download_type["platform"], product_title=product_title
                     )
@@ -2552,9 +2555,23 @@ class DownloadLibrary:
             return False
         return True
 
+    def _log_skip(self, message):
+        """Say what a filter passed over.
+
+        Useful when working out why something did not arrive, and a
+        wall of noise on a run that filters most of a library out, so
+        it drops to debug rather than disappearing when turned off
+        """
+        if self.log_skipped:
+            logger.info(message)
+        else:
+            logger.debug(message)
+
     def _should_download_file_by_ext_and_log(self, filename):
         if self._should_download_file_by_ext(filename) is False:
-            logger.info("Skipping the file {filename}".format(filename=filename))
+            self._log_skip(
+                "Skipping the file {filename}".format(filename=filename)
+            )
             return False
         return True
 

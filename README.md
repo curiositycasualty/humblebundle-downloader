@@ -269,6 +269,11 @@ to see exactly which file wins for each item before downloading anything.
 - Inside your library folder a file named `.cache.json` is saved and keeps track of the files that have been downloaded.
   This way running the download command again pointing to the same directory will only download new or updated files.
 - Use `--help` with all `hbd` commands to see available options
+- Every file a filter passes over is logged, which is useful for working out why something did not
+  arrive and a wall of noise on a run that filters most of a library out. `--hide-skipped` turns
+  those lines off; they drop to debug rather than disappearing, so `HBD_LOGLEVEL=DEBUG` still shows
+  them. Orders that could not be read are reported either way, since that is a problem rather than
+  a choice you made
 - Find supported platforms for the `--platform` flag by visiting your Humble Bundle Library
   and look under the **Platform** dropdown
 - Download select bundles by using the `-k` or `--keys` flag.

@@ -75,3 +75,15 @@ def test_exit_timeout_accepts_zero():
         ["-l", "some_path", "-c", "fake_cookie", "--exit-timeout", "0"]
     )
     assert args.exit_timeout == 0
+
+
+def test_skip_lines_are_shown_by_default():
+    args = parse_args(["-l", "some_path", "-c", "fake_cookie"])
+    assert args.hide_skipped is False
+
+
+def test_skip_lines_can_be_hidden():
+    args = parse_args(
+        ["-l", "some_path", "-c", "fake_cookie", "--hide-skipped"]
+    )
+    assert args.hide_skipped is True

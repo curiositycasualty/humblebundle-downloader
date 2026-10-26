@@ -1421,3 +1421,51 @@ def test_shutdown_grace_follows_the_module_default_when_patched(monkeypatch):
         "humblebundle_downloader.download_library.SHUTDOWN_GRACE", 3
     )
     assert DownloadLibrary("x").shutdown_grace == 3.0
+
+
+###
+# optional skip logging
+###
+def test_skip_lines_are_on_by_default():
+    assert DownloadLibrary("x").log_skipped is True
+
+
+def test_skip_lines_are_logged_at_info_when_on(caplog):
+    dl = DownloadLibrary("x")
+    with caplog.at_level(logging.INFO):
+        dl._log_skip("passed over something")
+    assert "passed over something" in caplog.text
+
+
+def test_skip_lines_drop_to_debug_when_off(caplog):
+    dl = DownloadLibrary("x", log_skipped=False)
+    with caplog.at_level(logging.INFO):
+        dl._log_skip("passed over something")
+    assert caplog.text == ""
+
+    with caplog.at_level(logging.DEBUG):
+        dl._log_skip("passed over something")
+    assert "passed over something" in caplog.text
+
+
+def test_the_extension_filter_line_follows_the_setting(caplog):
+    loud = DownloadLibrary("x", ext_include=["cbz"])
+    with caplog.at_level(logging.INFO):
+        assert loud._should_download_file_by_ext_and_log("book.pdf") is False
+    assert "Skipping the file book.pdf" in caplog.text
+
+    caplog.clear()
+    quiet = DownloadLibrary("x", ext_include=["cbz"], log_skipped=False)
+    with caplog.at_level(logging.INFO):
+        assert quiet._should_download_file_by_ext_and_log("book.pdf") is False
+    assert caplog.text == ""
+
+
+def test_hiding_skip_lines_does_not_change_what_is_downloaded():
+    loud = DownloadLibrary("x", ext_include=["cbz"])
+    quiet = DownloadLibrary("x", ext_include=["cbz"], log_skipped=False)
+    for name in ("book.cbz", "book.pdf", "BOOK.CBZ"):
+        assert (
+            loud._should_download_file_by_ext_and_log(name)
+            is quiet._should_download_file_by_ext_and_log(name)
+        )

@@ -99,6 +99,14 @@ def parse_args(args):
         ),
     )
     parser.add_argument(
+        "--hide-skipped",
+        action="store_true",
+        help=(
+            "Do not log every file a filter passes over. Handy when "
+            "--include or --platform leaves most of a library out"
+        ),
+    )
+    parser.add_argument(
         "--exit-timeout",
         type=float,
         default=None,
@@ -225,6 +233,7 @@ def cli():
             retries=cli_args.retries,
             verify=not cli_args.no_verify,
             shutdown_grace=cli_args.exit_timeout,
+            log_skipped=not cli_args.hide_skipped,
         ).start()
     except LibraryPathError as error:
         # Nothing to retry and nothing to show a traceback for: the

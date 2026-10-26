@@ -3,6 +3,9 @@
 
 ## Unreleased
 
+- Added `--hide-skipped` to turn off the line logged for every file a filter passes over, which is
+  most of the output on a run that filters most of a library out. The lines drop to debug rather
+  than disappearing, and orders that could not be read are still reported as errors
 - Added `--exit-timeout` to set how long the first Ctrl+C waits for downloads in flight before
   quitting anyway, which was fixed at ten seconds. `0` quits straight away, and a second Ctrl+C
   still ignores it entirely
