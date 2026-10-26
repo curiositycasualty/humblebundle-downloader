@@ -696,12 +696,20 @@ class DownloadLibrary:
         retries=5,
         verify=True,
         progress_style=DEFAULT_PROGRESS_STYLE,
+        shutdown_grace=None,
     ):
         self.library_path = library_path
         self.jobs = max(1, int(jobs))
         self.retries = max(0, int(retries))
         # Checked against what the api says, when it says anything
         self.verify = verify
+        # How long a first Ctrl-C waits for transfers in flight. Read
+        # from the module default when not given, so it stays one place
+        # to change for anyone embedding this
+        self.shutdown_grace = max(
+            0.0,
+            float(SHUTDOWN_GRACE if shutdown_grace is None else shutdown_grace),
+        )
         self.progress_bar = progress_bar
         # Several \r progress bars writing at once is unreadable, so the
         # per-file bar is for sequential runs. In parallel one reporter
@@ -903,7 +911,7 @@ class DownloadLibrary:
                 # Bounded: transfers check the stop flag between chunks,
                 # so this is quick, and anything that will not stop gets
                 # left behind rather than holding the run open
-                self._stop_workers(timeout=SHUTDOWN_GRACE)
+                self._stop_workers(timeout=self.shutdown_grace)
                 logger.warning("Interrupted, nothing further was downloaded")
                 sys.exit(INTERRUPT_EXIT_CODE)
         finally:

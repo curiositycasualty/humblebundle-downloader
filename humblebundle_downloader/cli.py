@@ -99,6 +99,17 @@ def parse_args(args):
         ),
     )
     parser.add_argument(
+        "--exit-timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "How long the first Ctrl+C waits for downloads in flight "
+            "before quitting anyway (default: 10). 0 quits straight "
+            "away; a second Ctrl+C always does"
+        ),
+    )
+    parser.add_argument(
         "--no-verify",
         action="store_true",
         help=(
@@ -187,6 +198,9 @@ def cli():
     if cli_args.retries < 0:
         sys.exit("--retries cannot be negative")
 
+    if cli_args.exit_timeout is not None and cli_args.exit_timeout < 0:
+        sys.exit("--exit-timeout cannot be negative")
+
     jobs = resolve_jobs(cli_args)
 
     from .download_library import DownloadLibrary, LibraryPathError
@@ -210,6 +224,7 @@ def cli():
             jobs=jobs,
             retries=cli_args.retries,
             verify=not cli_args.no_verify,
+            shutdown_grace=cli_args.exit_timeout,
         ).start()
     except LibraryPathError as error:
         # Nothing to retry and nothing to show a traceback for: the

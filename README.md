@@ -173,6 +173,9 @@ behind, and the next run replaces them.
 
 If a transfer is wedged somewhere that cannot be interrupted, the first Ctrl+C waits ten seconds
 for it before leaving anyway, so one press is always enough eventually and two are enough at once.
+`--exit-timeout SECONDS` changes that wait: `--exit-timeout 0` makes the first press quit straight
+away, a longer value gives slow drives and flaky connections more room to finish what they were
+doing. A second Ctrl+C ignores it entirely and quits at once however long it was set to.
 Either way the exit status is `130`, the usual convention for "stopped by SIGINT" — note that
 upstream exited `0` here, so a wrapper script can now tell an interrupted run from a complete one.
 

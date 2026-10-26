@@ -56,3 +56,22 @@ def test_no_parallel_overrides_jobs():
     )
     assert args.jobs == 12
     assert resolve_jobs(args) == 1
+
+
+def test_exit_timeout_defaults_to_unset():
+    args = parse_args(["-l", "some_path", "-c", "fake_cookie"])
+    assert args.exit_timeout is None
+
+
+def test_exit_timeout_accepts_a_fraction():
+    args = parse_args(
+        ["-l", "some_path", "-c", "fake_cookie", "--exit-timeout", "2.5"]
+    )
+    assert args.exit_timeout == 2.5
+
+
+def test_exit_timeout_accepts_zero():
+    args = parse_args(
+        ["-l", "some_path", "-c", "fake_cookie", "--exit-timeout", "0"]
+    )
+    assert args.exit_timeout == 0

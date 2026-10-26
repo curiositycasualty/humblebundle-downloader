@@ -3,6 +3,9 @@
 
 ## Unreleased
 
+- Added `--exit-timeout` to set how long the first Ctrl+C waits for downloads in flight before
+  quitting anyway, which was fixed at ten seconds. `0` quits straight away, and a second Ctrl+C
+  still ignores it entirely
 - Downloads are now checked against the checksum the api reports, hashed as they stream so there is
   no extra pass over the data. A file that does not match is discarded and downloaded again from
   scratch rather than resumed, and one that never matches is left out of the library and the cache.

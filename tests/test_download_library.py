@@ -25,6 +25,7 @@ from humblebundle_downloader.download_library import (
     DownloadLibrary,
     Interrupted,
     LibraryPathError,
+    SHUTDOWN_GRACE,
     _mount_hint,
     ChecksumMismatch,
     _digest_of,
@@ -1393,3 +1394,30 @@ def test_a_fresh_request_carries_no_validator():
     dl._reopen_for_resume("https://x/y.bin", "y.part", 500, '"v1"')
     # The range attempt carries it, the clean restart after 416 does not
     assert dl._validators == ['"v1"', None]
+
+
+###
+# exit timeout
+###
+def test_shutdown_grace_defaults_to_the_module_value():
+    assert DownloadLibrary("x").shutdown_grace == SHUTDOWN_GRACE
+
+
+def test_shutdown_grace_can_be_set():
+    assert DownloadLibrary("x", shutdown_grace=2).shutdown_grace == 2.0
+    assert DownloadLibrary("x", shutdown_grace=0.5).shutdown_grace == 0.5
+
+
+def test_shutdown_grace_of_zero_is_kept():
+    assert DownloadLibrary("x", shutdown_grace=0).shutdown_grace == 0.0
+
+
+def test_a_negative_shutdown_grace_becomes_zero():
+    assert DownloadLibrary("x", shutdown_grace=-5).shutdown_grace == 0.0
+
+
+def test_shutdown_grace_follows_the_module_default_when_patched(monkeypatch):
+    monkeypatch.setattr(
+        "humblebundle_downloader.download_library.SHUTDOWN_GRACE", 3
+    )
+    assert DownloadLibrary("x").shutdown_grace == 3.0
