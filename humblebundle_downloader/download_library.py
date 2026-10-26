@@ -6,6 +6,7 @@ import email
 import queue
 import parsel
 import shutil
+import tempfile
 import signal
 import logging
 import datetime
@@ -45,6 +46,21 @@ class LibraryPathError(Exception):
     Nothing is worth attempting until it can, so this is raised before
     the run starts rather than discovered one file at a time.
     """
+
+
+def _trove_stamp(raw):
+    """Date to tag an older trove file with, or None when the cache
+    holds something that is not a timestamp
+    """
+    if raw is None:
+        return None
+    try:
+        return time.strftime("%Y-%m-%d", time.localtime(int(raw)))
+    except (TypeError, ValueError, OSError, OverflowError):
+        logger.debug(
+            "Cache holds an unusable uploaded_at: {raw!r}".format(raw=raw)
+        )
+        return None
 
 
 def _unique_keys(keys):
@@ -1190,12 +1206,7 @@ class DownloadLibrary:
                     )
                     continue
 
-                if "uploaded_at" in cache_file_info:
-                    uploaded_at = time.strftime(
-                        "%Y-%m-%d", time.localtime(int(cache_file_info["uploaded_at"]))
-                    )
-                else:
-                    uploaded_at = None
+                uploaded_at = _trove_stamp(cache_file_info.get("uploaded_at"))
 
                 self._process_download(
                     product_r,
@@ -1722,13 +1733,37 @@ class DownloadLibrary:
         # jobs interleave and truncate each other's json
         with self._cache_lock:
             self.cache_data[cache_file_key] = file_info
-            with open(self.cache_file, "w") as outfile:
+            self._write_cache_data()
+
+    def _write_cache_data(self):
+        """Write somewhere else, then rename over the top.
+
+        The whole file is rewritten after every single download, so
+        writing in place leaves a window in which the cache is half
+        written. A run killed in that window, which is exactly what a
+        second Ctrl-C does, used to leave a truncated or empty
+        .cache.json that the next run could not read at all. os.replace
+        is atomic, so what is on disk is always one whole version or the
+        other.
+        """
+        folder = os.path.dirname(self.cache_file) or "."
+        handle, temp_path = tempfile.mkstemp(
+            prefix=".cache.json.", suffix=".tmp", dir=folder
+        )
+        try:
+            with os.fdopen(handle, "w") as outfile:
                 json.dump(
                     self.cache_data,
                     outfile,
                     sort_keys=True,
                     indent=4,
                 )
+                outfile.flush()
+                os.fsync(outfile.fileno())
+            os.replace(temp_path, self.cache_file)
+        except Exception:
+            _remove_quietly(temp_path)
+            raise
 
     def _check_cache_and_download(
         self,
@@ -1921,9 +1956,7 @@ class DownloadLibrary:
                 self._note_skip()
                 return False
         if "url_last_modified" in cache_file_info:
-            last_modified = datetime.datetime.strptime(
-                cache_file_info["url_last_modified"], "%a, %d %b %Y %H:%M:%S %Z"
-            ).strftime("%Y-%m-%d")
+            last_modified = self._cache_rename_date(cache_file_info)
         else:
             last_modified = None
 
@@ -2230,13 +2263,114 @@ class DownloadLibrary:
         )
 
     def _load_cache_data(self, cache_file):
+        self._clear_stale_cache_temps(cache_file)
+
         try:
             with open(cache_file, "r") as f:
                 cache_data = json.load(f)
         except FileNotFoundError:
-            cache_data = {}
+            return {}
+        except (ValueError, OSError) as error:
+            # A cache we cannot read is not worth dying over: the run
+            # can rebuild it. Keep the old one in case it is wanted
+            self._set_aside_bad_cache(cache_file, error)
+            return {}
 
-        return cache_data
+        if not isinstance(cache_data, dict):
+            self._set_aside_bad_cache(
+                cache_file, "it does not contain an object"
+            )
+            return {}
+
+        return self._usable_cache_entries(cache_data)
+
+    @staticmethod
+    def _usable_cache_entries(cache_data):
+        """Keep the entries that can be used, drop the ones that cannot.
+
+        Everything downstream treats an entry as a mapping: a stray
+        string or list would raise AttributeError on the traversal
+        thread and take the run down, and because any non empty value
+        counts as "already downloaded" it would also quietly skip that
+        file forever.
+
+        Dropping the whole cache over one bad entry means downloading
+        the library again, so only the bad entries go.
+        """
+        usable = {}
+        dropped = 0
+        for key, value in cache_data.items():
+            if isinstance(key, str) and isinstance(value, dict):
+                usable[key] = value
+            else:
+                dropped += 1
+
+        if dropped:
+            logger.warning(
+                "Ignoring {dropped} unreadable entr{plural} in the cache; "
+                "those files will be downloaded again".format(
+                    dropped=dropped, plural="y" if dropped == 1 else "ies"
+                )
+            )
+        return usable
+
+    @staticmethod
+    def _cache_rename_date(cache_file_info):
+        """The date to tag an older copy of a file with.
+
+        A cache written by another version, or edited by hand, can hold
+        anything at all here. Not knowing the date is only worth losing
+        the rename over, not the download
+        """
+        stamp = cache_file_info.get("url_last_modified")
+        if not isinstance(stamp, str):
+            return None
+        try:
+            return datetime.datetime.strptime(
+                stamp, "%a, %d %b %Y %H:%M:%S %Z"
+            ).strftime("%Y-%m-%d")
+        except ValueError:
+            logger.debug(
+                "Cache holds an unparseable date: {stamp!r}".format(stamp=stamp)
+            )
+            return None
+
+    def _clear_stale_cache_temps(self, cache_file):
+        """Tidy up half written caches left by a run that was killed.
+
+        os.replace means they never became the cache, but a hard kill
+        cannot unlink them either, so they would otherwise pile up
+        """
+        folder = os.path.dirname(cache_file) or "."
+        prefix = os.path.basename(cache_file) + "."
+        try:
+            leftovers = os.listdir(folder)
+        except OSError:
+            return
+
+        for name in leftovers:
+            if name.startswith(prefix) and name.endswith(".tmp"):
+                _remove_quietly(os.path.join(folder, name))
+
+    def _set_aside_bad_cache(self, cache_file, reason):
+        spoiled = "{cache_file}.unreadable-{stamp}".format(
+            cache_file=cache_file,
+            stamp=datetime.datetime.now().strftime("%Y%m%d-%H%M%S"),
+        )
+        try:
+            os.replace(cache_file, spoiled)
+            kept = " Kept as {spoiled}.".format(
+                spoiled=os.path.basename(spoiled)
+            )
+        except OSError:
+            kept = ""
+
+        logger.warning(
+            "Could not read {name}: {reason}.{kept} Starting a new one, so "
+            "files already downloaded will be fetched again".format(
+                name=os.path.basename(cache_file), reason=reason, kept=kept
+            )
+        )
 
     def _get_purchase_keys(self):
         try:

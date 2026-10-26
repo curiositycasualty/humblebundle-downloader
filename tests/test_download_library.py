@@ -24,6 +24,7 @@ from humblebundle_downloader.download_library import (
     Interrupted,
     LibraryPathError,
     _mount_hint,
+    _trove_stamp,
     _unique_keys,
     ProgressReporter,
     _coerce_size,
@@ -1155,3 +1156,131 @@ def test_different_destinations_are_both_allowed(tmp_path):
             file_size=10,
         )
     assert len(dl.pending_downloads) == 2
+
+
+###
+# cache file safety
+###
+def _cache_at(tmp_path, raw=None, contents=None):
+    path = tmp_path / ".cache.json"
+    if raw is not None:
+        path.write_bytes(raw)
+    elif contents is not None:
+        path.write_text(json.dumps(contents))
+    return str(path)
+
+
+@pytest.mark.parametrize("raw", [
+    b"",
+    b"   \n ",
+    b'{"a": {"url_last',
+    b"<html>nope</html>",
+    b"\xff\xfe\x00\x01",
+    b"null",
+    b'["a"]',
+    b'"a string"',
+    b"42",
+])
+def test_an_unreadable_cache_does_not_stop_the_run(tmp_path, raw):
+    path = _cache_at(tmp_path, raw=raw)
+    dl = DownloadLibrary(str(tmp_path))
+    assert dl._load_cache_data(path) == {}
+
+
+def test_an_unreadable_cache_is_kept_rather_than_deleted(tmp_path):
+    path = _cache_at(tmp_path, raw=b"not json")
+    DownloadLibrary(str(tmp_path))._load_cache_data(path)
+    kept = [p.name for p in tmp_path.iterdir() if ".unreadable-" in p.name]
+    assert len(kept) == 1
+
+
+def test_a_missing_cache_is_not_an_error(tmp_path):
+    dl = DownloadLibrary(str(tmp_path))
+    assert dl._load_cache_data(str(tmp_path / "nope.json")) == {}
+    assert not list(tmp_path.iterdir())
+
+
+def test_bad_entries_are_dropped_without_losing_the_good_ones(tmp_path):
+    good = {"k:one": {"url_last_modified": "x"}}
+    contents = dict(good)
+    contents.update({
+        "k:two": "a string", "k:three": [1], "k:four": None, "k:five": 7,
+    })
+    path = _cache_at(tmp_path, contents=contents)
+    dl = DownloadLibrary(str(tmp_path))
+    assert dl._load_cache_data(path) == good
+    assert not [p for p in tmp_path.iterdir() if ".unreadable-" in p.name]
+
+
+def test_a_non_mapping_entry_does_not_mark_a_file_as_downloaded():
+    # Anything non-empty counted as "already have it", so the file was
+    # skipped for good rather than re-fetched
+    usable = DownloadLibrary._usable_cache_entries({"k:ghost": "truthy"})
+    assert usable == {}
+
+
+@pytest.mark.parametrize("stamp", [
+    "not a date", "", "2024-01-01", None, 17, [], {"a": 1},
+])
+def test_an_unusable_rename_date_is_ignored(stamp):
+    assert DownloadLibrary._cache_rename_date(
+        {"url_last_modified": stamp}
+    ) is None
+
+
+def test_a_real_rename_date_is_parsed():
+    assert DownloadLibrary._cache_rename_date(
+        {"url_last_modified": "Mon, 01 Jan 2024 00:00:00 GMT"}
+    ) == "2024-01-01"
+
+
+@pytest.mark.parametrize("raw", ["not a number", "", None, [], {}, "9" * 40])
+def test_an_unusable_trove_stamp_is_ignored(raw):
+    assert _trove_stamp(raw) is None
+
+
+def test_a_real_trove_stamp_is_parsed():
+    assert _trove_stamp("1600000000") is not None
+    assert _trove_stamp(1600000000) is not None
+
+
+def test_the_cache_is_written_through_a_temporary_file(tmp_path):
+    dl = DownloadLibrary(str(tmp_path))
+    dl.cache_file = str(tmp_path / ".cache.json")
+    dl.cache_data = {}
+    dl._update_cache_data("k:one", {"url_last_modified": "x"})
+
+    with open(dl.cache_file) as handle:
+        assert json.load(handle) == {"k:one": {"url_last_modified": "x"}}
+    assert not [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+
+
+def test_a_failed_write_leaves_the_previous_cache_alone(tmp_path, monkeypatch):
+    dl = DownloadLibrary(str(tmp_path))
+    dl.cache_file = str(tmp_path / ".cache.json")
+    dl.cache_data = {}
+    dl._update_cache_data("k:one", {"url_last_modified": "first"})
+
+    def explode(*args, **kwargs):
+        raise OSError("disk went away")
+
+    monkeypatch.setattr(json, "dump", explode)
+    with pytest.raises(OSError):
+        dl._update_cache_data("k:two", {"url_last_modified": "second"})
+
+    with open(dl.cache_file) as handle:
+        assert json.load(handle) == {"k:one": {"url_last_modified": "first"}}
+    assert not [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+
+
+def test_stale_temp_files_are_swept_on_load(tmp_path):
+    (tmp_path / ".cache.json").write_text("{}")
+    (tmp_path / ".cache.json.abc123.tmp").write_text("half written")
+    (tmp_path / ".cache.json.def456.tmp").write_text("half written")
+    (tmp_path / "keep-me.tmp").write_text("not ours")
+
+    dl = DownloadLibrary(str(tmp_path))
+    dl._load_cache_data(str(tmp_path / ".cache.json"))
+
+    names = sorted(p.name for p in tmp_path.iterdir())
+    assert names == [".cache.json", "keep-me.tmp"]
