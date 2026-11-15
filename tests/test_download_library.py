@@ -23,6 +23,7 @@ import threading
 
 from humblebundle_downloader.download_library import (
     DownloadLibrary,
+    NullReporter,
     Interrupted,
     LibraryPathError,
     SHUTDOWN_GRACE,
@@ -836,12 +837,46 @@ def test_repaint_moves_back_over_the_previous_block():
 
 
 def test_only_used_for_parallel_runs_with_progress():
-    assert DownloadLibrary("x", jobs=1, progress_bar=True)._progress is None
-    assert DownloadLibrary("x", jobs=4, progress_bar=False)._progress is None
+    # There is always a reporter now, so what matters is which one and
+    # whether the per-file bar is drawn instead
+    sequential = DownloadLibrary("x", jobs=1, progress_bar=True)
+    assert isinstance(sequential._progress, NullReporter)
+    assert sequential._show_bar is True
+    assert sequential._show_status is False
+
+    no_progress = DownloadLibrary("x", jobs=4, progress_bar=False)
+    assert isinstance(no_progress._progress, NullReporter)
+    assert no_progress._show_bar is False
+    assert no_progress._show_status is False
+
     parallel = DownloadLibrary("x", jobs=4, progress_bar=True)
-    assert parallel._progress is not None
+    assert isinstance(parallel._progress, ProgressReporter)
     assert parallel._progress.slots == 4
     assert parallel._show_bar is False
+    assert parallel._show_status is True
+
+
+def test_the_null_reporter_answers_every_call_a_real_one_does():
+    real, null = ProgressReporter(stream=io.StringIO()), NullReporter()
+    spoken_to = [
+        name for name in dir(real)
+        if not name.startswith("_") and callable(getattr(real, name))
+    ]
+    missing = [name for name in spoken_to if not hasattr(null, name)]
+    assert missing == [], missing
+
+    # And saying all of it to the stand-in does nothing and raises nothing
+    null.file_queued()
+    null.traversal_finished()
+    null.file_started("a.cbz", 10)
+    null.file_progress("a.cbz", 5)
+    null.file_finished("a.cbz")
+    null.file_skipped()
+    null.start()
+    null.paint()
+    null.clear()
+    null.stop()
+    assert null.enabled() is False
 
 
 ###
@@ -1469,3 +1504,112 @@ def test_hiding_skip_lines_does_not_change_what_is_downloaded():
             loud._should_download_file_by_ext_and_log(name)
             is quiet._should_download_file_by_ext_and_log(name)
         )
+
+
+###
+# the shared request/backoff helper
+###
+class ThrottleThenOk:
+    """Refuses `refusals` times with a 429, then answers."""
+
+    def __init__(self, refusals, retry_after="1"):
+        self.headers = {}
+        self.cookies = {}
+        self.refusals = refusals
+        self.retry_after = retry_after
+        self.calls = []
+
+    def _answer(self, verb, url, **kwargs):
+        self.calls.append((verb, url, kwargs))
+        if self.refusals > 0:
+            self.refusals -= 1
+            return type("R", (), {
+                "status_code": 429,
+                "headers": {"Retry-After": self.retry_after},
+                "close": lambda self: None,
+            })()
+        return type("R", (), {
+            "status_code": 200, "headers": {}, "close": lambda self: None,
+        })()
+
+    def get(self, url, **kwargs):
+        return self._answer("get", url, **kwargs)
+
+    def head(self, url, **kwargs):
+        return self._answer("head", url, **kwargs)
+
+
+def _with_session(session, **kwargs):
+    dl = DownloadLibrary("x", **kwargs)
+    dl.session = session
+    return dl
+
+
+def test_a_throttled_request_is_retried_then_succeeds():
+    session = ThrottleThenOk(refusals=1, retry_after="0")
+    dl = _with_session(session, retries=3)
+    response = dl._request_with_backoff("get", "https://x/y.bin")
+    assert response.status_code == 200
+    assert len(session.calls) == 2
+    assert dl._throttled_count == 1
+
+
+def test_a_request_throttled_throughout_gives_up():
+    session = ThrottleThenOk(refusals=99, retry_after="0")
+    dl = _with_session(session, retries=2)
+    assert dl._request_with_backoff("get", "https://x/y.bin") is None
+    assert len(session.calls) == 3   # retries + 1
+
+
+def test_the_verb_is_honoured():
+    session = ThrottleThenOk(refusals=0)
+    dl = _with_session(session)
+    dl._request_with_backoff("head", "https://x/y.bin", allow_redirects=True)
+    assert session.calls[0][0] == "head"
+    assert session.calls[0][2]["allow_redirects"] is True
+
+
+def test_a_request_that_raises_gives_up_quietly_when_asked(caplog):
+    class Broken:
+        headers = {}
+        cookies = {}
+
+        def get(self, url, **kwargs):
+            raise IOError("no route to host")
+
+        head = get
+
+    with caplog.at_level(logging.ERROR):
+        assert _with_session(Broken())._request_with_backoff(
+            "head", "https://x/y.bin", quiet=True
+        ) is None
+    assert caplog.text == ""
+
+    with caplog.at_level(logging.ERROR):
+        assert _with_session(Broken())._request_with_backoff(
+            "get", "https://x/y.bin"
+        ) is None
+    assert "Failed to GET" in caplog.text
+
+
+def test_a_stopped_run_does_not_send_the_request():
+    session = ThrottleThenOk(refusals=0)
+    dl = _with_session(session)
+    dl._stop.set()
+    assert dl._request_with_backoff("get", "https://x/y.bin") is None
+    assert session.calls == []
+
+
+def test_the_range_headers_are_built_by_the_caller():
+    session = ThrottleThenOk(refusals=0)
+    dl = _with_session(session)
+    dl._get_with_backoff("https://x/y.bin", range_start=500, if_range='"v1"')
+    sent = session.calls[0][2]["headers"]
+    assert sent == {"Range": "bytes=500-", "If-Range": '"v1"'}
+
+
+def test_no_range_headers_without_a_start():
+    session = ThrottleThenOk(refusals=0)
+    dl = _with_session(session)
+    dl._get_with_backoff("https://x/y.bin")
+    assert session.calls[0][2]["headers"] is None

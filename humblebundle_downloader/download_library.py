@@ -221,6 +221,53 @@ def _fit(text, width):
     return "…" + text[-(width - 1):]
 
 
+class NullReporter:
+    """Stands in when nothing is being displayed.
+
+    Every call site used to ask whether there was a reporter before
+    saying anything to it. There is always one now; this is the one
+    that listens and does nothing.
+    """
+
+    slots = 0
+
+    def enabled(self):
+        return False
+
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
+
+    def clear(self):
+        pass
+
+    def paint(self):
+        pass
+
+    def render(self, width=80, height=24):
+        return []
+
+    def file_queued(self):
+        pass
+
+    def file_skipped(self):
+        pass
+
+    def traversal_finished(self):
+        pass
+
+    def file_started(self, name, total):
+        pass
+
+    def file_progress(self, name, downloaded):
+        pass
+
+    def file_finished(self, name, ok=True):
+        pass
+
+
 class ProgressReporter:
     """A block of lines repainted in place: one per transfer in flight,
     plus a totals line, in the manner of a package manager.
@@ -723,7 +770,7 @@ class DownloadLibrary:
         self._progress = (
             ProgressReporter(slots=self.jobs, style=progress_style)
             if self._show_status
-            else None
+            else NullReporter()
         )
 
         self._queue = None
@@ -896,10 +943,9 @@ class DownloadLibrary:
                             break
                         self._process_order_id(order_id)
 
-                if self._progress is not None:
-                    # Everything is queued, so the totals have a real
-                    # denominator now and can show a bar
-                    self._progress.traversal_finished()
+                # Everything is queued, so the totals have a real
+                # denominator now and can show a bar
+                self._progress.traversal_finished()
 
                 self._stop_workers()
 
@@ -963,8 +1009,7 @@ class DownloadLibrary:
 
         def handler(signum, frame):
             if self._stop.is_set():
-                if self._progress is not None:
-                    self._progress.clear()
+                self._progress.clear()
                 sys.stderr.write(
                     "\nQuitting now. Partly downloaded files are left "
                     "behind and will be redone next run.\n"
@@ -973,8 +1018,7 @@ class DownloadLibrary:
                 return
 
             self._stop.set()
-            if self._progress is not None:
-                self._progress.clear()
+            self._progress.clear()
             sys.stderr.write(
                 "\nStopping. Waiting for downloads in flight, press "
                 "Ctrl-C again to quit immediately.\n"
@@ -1077,8 +1121,7 @@ class DownloadLibrary:
         logger.info(
             "Downloading with {jobs} parallel jobs".format(jobs=self.jobs)
         )
-        if self._progress is not None:
-            self._progress.start()
+        self._progress.start()
 
         # Bounded, so traversal cannot run far ahead of the downloads
         self._queue = queue.Queue(maxsize=self.jobs * 4)
@@ -1110,8 +1153,7 @@ class DownloadLibrary:
         self._workers = []
         self._queue = None
 
-        if self._progress is not None:
-            self._progress.stop()
+        self._progress.stop()
 
         if stubborn:
             # A transfer is wedged somewhere uninterruptible. The user
@@ -1665,26 +1707,10 @@ class DownloadLibrary:
 
     def _get_remote_headers(self, remote_file):
         """Headers only, so nothing is transferred to size up a file"""
-        for _ in range(self.retries + 1):
-            self._wait_out_cooldown()
-            if self._stop.is_set():
-                return None
-
-            try:
-                head_r = self._session().head(remote_file, allow_redirects=True)
-            except Exception:
-                logger.debug(
-                    "Failed to get headers for {remote_file}".format(
-                        remote_file=remote_file
-                    )
-                )
-                return None
-
-            if head_r.status_code not in THROTTLE_STATUSES:
-                break
-
-            self._enter_cooldown(_retry_after_seconds(head_r), remote_file)
-        else:
+        head_r = self._request_with_backoff(
+            "head", remote_file, quiet=True, allow_redirects=True
+        )
+        if head_r is None:
             return None
 
         if head_r.status_code != 200:
@@ -1878,8 +1904,7 @@ class DownloadLibrary:
             "hashes": hashes or {},
         }
 
-        if self._progress is not None:
-            self._progress.file_queued()
+        self._progress.file_queued()
 
         if self._queue is not None and synchronous is False:
             # Hand it to a worker. Blocks once the queue is full, which
@@ -1914,8 +1939,7 @@ class DownloadLibrary:
 
     def _note_skip(self):
         """Queued, then turned out not to need downloading"""
-        if self._progress is not None:
-            self._progress.file_skipped()
+        self._progress.file_skipped()
 
     def _library_vanished(self):
         """The library root is no longer there.
@@ -1965,38 +1989,52 @@ class DownloadLibrary:
             if if_range:
                 headers["If-Range"] = if_range
 
+        return self._request_with_backoff(
+            "get", remote_file, stream=stream, headers=headers
+        )
+
+    def _request_with_backoff(self, method, url, quiet=False, **kwargs):
+        """Send a request, waiting out any pool wide cooldown first and
+        treating a 429 as everyone's problem rather than this caller's.
+
+        The GET that streams a file and the HEAD that sizes one had the
+        same loop twice over, differing only in the verb and in how
+        loudly they complain when it does not work.
+        """
         for _ in range(self.retries + 1):
             self._wait_out_cooldown()
             if self._stop.is_set():
                 return None
 
             try:
-                response = self._session().get(
-                    remote_file, stream=stream, headers=headers
-                )
+                response = getattr(self._session(), method)(url, **kwargs)
             except Exception:
-                logger.exception(
-                    "Failed to download {remote_file}".format(
-                        remote_file=remote_file
-                    )
+                trouble = "Failed to {method} {url}".format(
+                    method=method.upper(), url=url
                 )
+                if quiet:
+                    logger.debug(trouble)
+                else:
+                    logger.exception(trouble)
                 return None
 
             if response.status_code not in THROTTLE_STATUSES:
                 return response
 
-            self._enter_cooldown(_retry_after_seconds(response), remote_file)
+            self._enter_cooldown(_retry_after_seconds(response), url)
             try:
                 response.close()
             except Exception:
                 pass
 
-        logger.error(
-            "Giving up on {remote_file}: still throttled after {count} "
-            "attempts".format(
-                remote_file=remote_file, count=self.retries + 1
-            )
+        exhausted = (
+            "Giving up on {url}: still throttled after {count} "
+            "attempts".format(url=url, count=self.retries + 1)
         )
+        if quiet:
+            logger.debug(exhausted)
+        else:
+            logger.error(exhausted)
         return None
 
     def _run_download_job(self, job):
@@ -2116,9 +2154,8 @@ class DownloadLibrary:
                     )
                 )
 
-            if self._progress is not None:
-                self._progress.file_finished(label, ok=False)
-                self._progress.clear()
+            self._progress.file_finished(label, ok=False)
+            self._progress.clear()
 
             # Clean up the partial transfer. Any previously downloaded
             # copy of the file is left untouched
@@ -2143,8 +2180,7 @@ class DownloadLibrary:
                 file_info["url_last_modified"] = datetime.datetime.now().strftime(
                     "%a, %d %b %Y %H:%M:%S %Z"
                 )
-            if self._progress is not None:
-                self._progress.file_finished(label, ok=True)
+            self._progress.file_finished(label, ok=True)
 
             self._update_cache_data(cache_file_key, file_info)
             self._log_completed(local_filename, written, time.time() - started)
@@ -2165,9 +2201,8 @@ class DownloadLibrary:
         """
         if self.jobs == 1:
             return
-        if self._progress is not None:
-            # Land this line on a clean row; the reporter repaints after
-            self._progress.clear()
+        # Land this line on a clean row; the reporter repaints after
+        self._progress.clear()
         logger.info(
             "Downloaded {name} ({size} in {elapsed:.1f}s)".format(
                 name=os.path.basename(local_filename),
@@ -2214,8 +2249,7 @@ class DownloadLibrary:
         algorithm = self._hash_algorithm(hashes)
         hasher = hashlib.new(algorithm) if algorithm else None
 
-        if self._progress is not None:
-            self._progress.file_started(label, total)
+        self._progress.file_started(label, total)
 
         while True:
             try:
@@ -2273,10 +2307,9 @@ class DownloadLibrary:
                         _feed_hash_from_file(hasher, part_file)
                 validator = _validator_for(response) or validator
 
-                if self._progress is not None:
-                    # A resume changes what the whole file weighs
-                    self._progress.file_started(label, total)
-                    self._progress.file_progress(label, already)
+                # A resume changes what the whole file weighs
+                self._progress.file_started(label, total)
+                self._progress.file_progress(label, already)
 
     @staticmethod
     def _check_digest(algorithm, hasher, hashes, label):
@@ -2390,7 +2423,7 @@ class DownloadLibrary:
                     hasher.update(data)
                 if self._show_bar:
                     self._draw_bar(written, total)
-                elif self._progress is not None and label is not None:
+                elif label is not None:
                     self._progress.file_progress(label, written)
 
         if total is not None and written < total:
