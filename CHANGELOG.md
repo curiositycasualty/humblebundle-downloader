@@ -1,8 +1,11 @@
 # Change log
 
 
-## Unreleased
+## 0.5.0
 
+- The worm now eats the apple at the end, as the mouse does the cheese
+- Fixed `--update` crashing on a changed file with no extension, and on a path with a dot in a
+  folder name, when keeping the previous version beside the new one
 - Added `--vault`, for the subscriber vault that replaced the Trove: its games download into a
   `Humble Vault` folder, signed through the vault's own server action. `--trove`, which meant only
   the Trove, now means only the vault

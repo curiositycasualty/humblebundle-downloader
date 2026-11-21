@@ -46,8 +46,14 @@ PROGRESS_STYLES = {
     },
     # An arrow in flight, which thunks into the target as the file lands
     "arrow": {"muncher": (">>--->", ">>--->"), "pellet": " ", "wake": " ", "end": "(◎)", "enters": True},
-    # A worm wriggling along to the apple
-    "worm": {"muncher": ("~~:)", "-~:)"), "pellet": "·", "wake": " ", "end": "Q"},
+    # A worm wriggling along to the apple, and then eating it
+    "worm": {
+        "muncher": ("~~:)", "-~:)"),
+        "pellet": "·",
+        "wake": " ",
+        "end": "Q",
+        "eaten": ("Q", "c", "·", " "),
+    },
     # A rocket, exhaust behind it, off into space
     "rocket": {"muncher": ("=]>", "≡]>"), "pellet": "·", "wake": "~", "exits": True, "enters": True},
     # Someone sprinting, arms pumping, straight off the end

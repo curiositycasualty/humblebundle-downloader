@@ -1682,9 +1682,19 @@ class DownloadLibrary:
     def _rename_old_file(self, local_filename, append_str):
         # Check if older file exists, if so rename
         if os.path.isfile(local_filename) is True:
-            filename_parts = local_filename.rsplit(".", 1)
-            new_name = "{name}_{append_str}.{ext}".format(
-                name=filename_parts[0], append_str=append_str, ext=filename_parts[1]
+            # Keeps the previous version beside the new one, by design.
+            # Split on the name only: a dot in a folder name, or a file
+            # with no extension at all (some game downloads), must not
+            # end up in the wrong place or crash it
+            folder, name = os.path.split(local_filename)
+            stem, dot, ext = name.rpartition(".")
+            if not dot or not stem:
+                stem, ext = name, ""
+            new_name = os.path.join(
+                folder,
+                "{stem}_{append_str}{ext}".format(
+                    stem=stem, append_str=append_str, ext="." + ext if ext else ""
+                ),
             )
             os.rename(local_filename, new_name)
             logger.info("Renamed older file to {new_name}".format(new_name=new_name))

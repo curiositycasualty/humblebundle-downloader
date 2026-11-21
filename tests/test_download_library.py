@@ -1974,3 +1974,23 @@ def test_a_hard_exit_does_not_wait_forever_on_a_stuck_cache(tmp_path, monkeypatc
     finally:
         dl._cache_lock.release()
     assert time.time() - started < 5
+
+
+@pytest.mark.parametrize("name,kept", [
+    ("book.pdf", "book_2026-11-21.pdf"),
+    ("escapegoat2-05212014-bin", "escapegoat2-05212014-bin_2026-11-21"),
+    (".hidden", ".hidden_2026-11-21"),
+    ("archive.tar.gz", "archive.tar_2026-11-21.gz"),
+])
+def test_an_older_version_is_kept_beside_the_new_one(tmp_path, name, kept):
+    folder = tmp_path / "Vol. 1"              # a dot in the folder name
+    folder.mkdir()
+    (folder / name).write_text("old")
+    DownloadLibrary(str(tmp_path))._rename_old_file(str(folder / name), "2026-11-21")
+    assert sorted(p.name for p in folder.iterdir()) == [kept]
+
+
+def test_the_worm_eats_the_apple():
+    style = PROGRESS_STYLES["worm"]
+    assert _muncher_bar(0.5, 20, style, 0).endswith("Q]")
+    assert _muncher_bar(1.0, 20, style, 0).endswith(style["muncher"][0] + " ]")
