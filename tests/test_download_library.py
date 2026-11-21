@@ -1672,8 +1672,10 @@ def test_the_train_runs_along_the_rails_into_a_tunnel():
     middle = _muncher_bar(0.5, 20, style, 1)
     end = _muncher_bar(1.0, 20, style, 0)
     assert start == "[[]=[]=[]>" + "═" * 9 + "▐▓]"
-    assert middle.startswith("[" + "═" * 4 + "[]-[]-[]>")
-    assert end == "[" + "═" * 9 + "[]=[]=[]>▐▓]"
+    assert middle == "[" + "═" * 9 + "[]-[]-[]>▐▓]"
+    # Gone into the tunnel, car by car
+    assert _muncher_bar(0.9, 20, style, 0) == "[" + "═" * 16 + "[]▐▓]"
+    assert end == "[" + "═" * 18 + "▐▓]"
     assert len({len(start), len(middle), len(end)}) == 1
 
 
@@ -1709,12 +1711,24 @@ def test_the_light_cycle_rides_off_the_end_at_100():
     assert widths == {22}
 
 
-def test_only_the_cycle_exits():
+TRAVELLERS = {"cycle", "train", "fish", "snail"}
+
+
+@pytest.mark.parametrize("name", sorted(TRAVELLERS))
+def test_travellers_leave_the_bar_at_100(name):
+    style = PROGRESS_STYLES[name]
+    assert style.get("exits")
+    done = _muncher_bar(1.0, 20, style, 0)
+    assert done == "[" + style["wake"] * (20 - len(style.get("end", ""))) + style.get("end", "") + "]"
+    # And are in it at the start
+    assert style["muncher"][0] in _muncher_bar(0.0, 20, style, 0)
+
+
+def test_plain_bars_just_fill():
     for name, style in PROGRESS_STYLES.items():
-        if name != "cycle":
+        if name not in TRAVELLERS:
             assert not style.get("exits")
-            # Still there at the end, not gone
-            assert style["muncher"][0] in _muncher_bar(1.0, 20, style, 0)
+            assert _muncher_bar(1.0, 20, style, 0) == "[" + style["wake"] * 20 + "]"
 
 
 ###

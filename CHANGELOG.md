@@ -3,6 +3,8 @@
 
 ## Unreleased
 
+- The train now runs into its tunnel, and the fish and snail off the end of the bar, at 100%, as the
+  light cycle does, instead of stopping at the end. `bars` and `blocks` just fill
 - Added `-j auto`: start at 4 downloads at once and find the fastest number while the run goes,
   up to 16. It adds two at a time while that makes the total at least 10% faster, takes a step back
   as soon as one does not, and halves when throttled; it only learns while every slot is busy.

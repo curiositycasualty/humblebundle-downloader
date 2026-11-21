@@ -16,9 +16,9 @@ the same width, or the bar will jitter as it animates.
 
 PROGRESS_STYLES = {
     # A little fish swimming along, eating the pellets in front of it
-    "fish": {"muncher": ("><>", ">=>"), "pellet": "·", "wake": "~"},
+    "fish": {"muncher": ("><>", ">=>"), "pellet": "·", "wake": "~", "exits": True},
     # A snail, leaving a slime trail. Slow things look right in it
-    "snail": {"muncher": ("@¬", "@~"), "pellet": "·", "wake": "="},
+    "snail": {"muncher": ("@¬", "@~"), "pellet": "·", "wake": "=", "exits": True},
     # A plain filling bar
     "bars": {"muncher": ("#",), "pellet": "-", "wake": "#"},
     # Solid blocks, for terminals with a good font
@@ -42,6 +42,8 @@ PROGRESS_STYLES = {
         "pellet": "═",
         "wake": "═",
         "end": "▐▓",
+        # Into the tunnel, rather than stopping at its mouth
+        "exits": True,
         "scene": "sl",
     },
 }
