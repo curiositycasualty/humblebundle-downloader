@@ -200,12 +200,18 @@ summary line automatically.
 ### Stopping a run
 
 **Ctrl+C** asks for a tidy stop. Transfers check between chunks, so they give up promptly rather
-than at the end of whatever multi-gigabyte file they happen to be on. Partly downloaded `.part`
-files are removed, the cache keeps everything already finished, and the run exits with status
-`130`. A second run picks up where this one left off.
+than at the end of whatever multi-gigabyte file they happen to be on. Each partly downloaded file
+is kept as `<file>.part`, beside a small `<file>.part.json` noting which version of the file it came
+from, and the next run carries on from there rather than starting again. It asks only for the rest
+(`Range`), and only if the file has not changed since (`If-Range`); if it has, that file starts
+again from the top. Either way the whole file is checked against its checksum at the end. The cache
+keeps everything already finished, and the run exits with status `130`.
 
-**Ctrl+C again** quits immediately, whatever state anything is in. Partly downloaded files are left
-behind, and the next run replaces them.
+**Ctrl+C again** quits immediately, whatever state anything is in, as the operating system's
+default for a second interrupt rather than anything the downloader does. The `.part.json` is
+written as each transfer starts, so the partial files this leaves can be carried on from too. The
+cache is saved every few seconds, so this can lose the last few seconds of it; files it forgets are
+complete on disk, and the next run recognises them without downloading them again.
 
 If a transfer is wedged somewhere that cannot be interrupted, the first Ctrl+C waits up to five
 minutes for it before leaving anyway, so one press is always enough eventually and two are enough
@@ -218,8 +224,8 @@ upstream exited `0` here, so a wrapper script can now tell an interrupted run fr
 
 A few notes on what parallelism does and does not touch. Each worker gets its own
 `requests.Session`, built from the authenticated one, since `requests.Session` is not documented as
-thread safe. `.cache.json` is rewritten in full after every completed file, so the update and the
-write are held under one lock — without it, concurrent jobs truncate each other's json. asm.js games
+thread safe. `.cache.json` is written at most every five seconds and once more when the run ends,
+always whole, under one lock so concurrent jobs cannot truncate each other's json. asm.js games
 still download their page sequentially, because the list of data files to fetch is read out of that
 page. Dry runs stay single threaded, having nothing to download.
 

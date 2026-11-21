@@ -3,6 +3,12 @@
 
 ## Unreleased
 
+- A file stopped part way by Ctrl+C is now kept as `<file>.part`, with a `<file>.part.json` noting
+  which version of the file it came from, and the next run carries on from where it stopped instead
+  of downloading it again from the start. It asks for the rest only if the file is unchanged
+  (`If-Range`), starts again if not, and checks the whole file's checksum at the end as before. A
+  file that failed rather than stopped is still thrown away. The note is written as each transfer
+  starts, so files left by a second Ctrl+C can be carried on from too
 - A run that could not download some files now lists them at the end, with why, and exits `1`
   instead of `0`, so a script or scheduled job can tell it from a clean run. A file the server
   answers 404 or similar for was skipped silently before, at debug level. Interrupted runs still

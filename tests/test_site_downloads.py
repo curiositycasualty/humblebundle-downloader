@@ -118,12 +118,18 @@ class FakeHumble(FakeSite):
             return CdnResponse(b"", 404, url)
         body = self.bodies[name]
         start = 0
+        changed = getattr(self, "last_modified", LAST_MODIFIED)
+        if headers and headers.get("If-Range") and headers["If-Range"] != changed:
+            # Not the file the caller started on: all of the new one
+            return CdnResponse(body, 200, url, {"Last-Modified": changed},
+                               streamed=self.streamed)
         if headers and headers.get("Range"):
             start = int(headers["Range"].split("=")[1].rstrip("-"))
             return CdnResponse(body[start:], 206, url, {
-                "Content-Range": "bytes {0}-{1}/{2}".format(start, len(body) - 1, len(body))},
+                "Content-Range": "bytes {0}-{1}/{2}".format(start, len(body) - 1, len(body)),
+                "Last-Modified": changed},
                 streamed=self.streamed)
-        return CdnResponse(body, 200, url, streamed=self.streamed)
+        return CdnResponse(body, 200, url, {"Last-Modified": changed}, streamed=self.streamed)
 
     def head(self, url, **kwargs):
         return self.get(url, **kwargs)
@@ -625,3 +631,122 @@ def test_the_cli_exits_non_zero_only_when_something_failed(monkeypatch, failed, 
         with pytest.raises(SystemExit) as stopped:
             cli_module.cli()
         assert stopped.value.code == code
+
+
+
+###
+# carrying on from an earlier run
+###
+BIG = bytes(range(256)) * 200          # 51,200 bytes: a dozen chunks
+
+
+def one_big_file(body=BIG):
+    entries = [entry("g1", "bg", "Big Game", "Big Bundle")]
+    pages = {"/home/library/bg": bundle_page(
+        "bg", "Big Bundle",
+        entitlement("g1", "Big Game", download("k-big.zip", "windows", real_struct("big.zip", body=body))),
+    )}
+    return entries, pages
+
+
+class StopAfter:
+    """Has the CDN ask the run to stop after so many chunks of a file"""
+
+    def __init__(self, fake, chunks):
+        self.fake, self.chunks, self.dl = fake, chunks, None
+        original = CdnResponse.iter_content
+        hook = self
+
+        def iter_content(response, chunk_size=4096):
+            for n, chunk in enumerate(original(response, chunk_size)):
+                if hook.dl is not None and n == hook.chunks:
+                    hook.dl._stop.set()
+                yield chunk
+
+        self.patch = iter_content
+
+
+def stopped_part_way(tmp_path, monkeypatch, chunks=4, body=BIG):
+    fake = FakeHumble(*one_big_file(body), bodies={"big.zip": body})
+    stopper = StopAfter(fake, chunks)
+    monkeypatch.setattr(CdnResponse, "iter_content", stopper.patch)
+    dl = library(tmp_path, fake, jobs=1)
+    stopper.dl = dl
+    with pytest.raises(SystemExit) as stopped:
+        dl.start()
+    assert stopped.value.code == 130
+    monkeypatch.undo()
+    return fake
+
+
+def test_a_stopped_transfer_keeps_its_part_file_and_note(tmp_path, monkeypatch, caplog):
+    import logging
+
+    caplog.set_level(logging.INFO)
+    stopped_part_way(tmp_path, monkeypatch)
+    assert "the next run carries on from there" in caplog.text
+    folder = tmp_path / "lib" / "Big Bundle" / "Big Game"
+    part = folder / "big.zip.part"
+    assert part.exists() and 0 < part.stat().st_size < len(BIG)
+    assert json.loads((folder / "big.zip.part.json").read_text()) == {"validator": LAST_MODIFIED}
+    assert not (folder / "big.zip").exists()
+
+
+def test_the_next_run_carries_on_where_it_stopped(tmp_path, monkeypatch):
+    stopped_part_way(tmp_path, monkeypatch)
+    folder = tmp_path / "lib" / "Big Bundle" / "Big Game"
+    held = (folder / "big.zip.part").stat().st_size
+
+    fake = FakeHumble(*one_big_file(), bodies={"big.zip": BIG})
+    library(tmp_path, fake, jobs=1).start()
+
+    assert (folder / "big.zip").read_bytes() == BIG
+    assert not (folder / "big.zip.part").exists()
+    assert not (folder / "big.zip.part.json").exists()
+    # One request for the rest, not a second go from the top
+    assert len(fake.cdn_gets) == 1
+    name, _, headers = fake.cdn_gets[0]
+    assert headers.get("Range") == "bytes={0}-".format(held)
+    assert headers.get("If-Range") == LAST_MODIFIED
+    # And the checksum, over earlier bytes and new, matched the listing
+    assert cache_of(tmp_path)["bg:big.zip"]["sha1"] == hashlib.sha1(BIG).hexdigest()
+
+
+def test_a_file_changed_since_starts_again_from_the_top(tmp_path, monkeypatch):
+    stopped_part_way(tmp_path, monkeypatch)
+    folder = tmp_path / "lib" / "Big Bundle" / "Big Game"
+    newer = bytes(reversed(range(256))) * 200
+
+    fake = FakeHumble(*one_big_file(newer), bodies={"big.zip": newer})
+    fake.last_modified = "Fri, 20 Nov 2026 09:00:00 GMT"
+    library(tmp_path, fake, jobs=1).start()
+    assert (folder / "big.zip").read_bytes() == newer
+
+
+def test_a_failed_transfer_throws_its_part_away(tmp_path):
+    entries, pages = one_big_file()
+    fake = FakeHumble(entries, pages, bodies={"big.zip": b"q" * len(BIG)})
+    library(tmp_path, fake, jobs=1, retries=0).start()
+    folder = tmp_path / "lib" / "Big Bundle" / "Big Game"
+    assert not (folder / "big.zip.part").exists()
+    assert not (folder / "big.zip.part.json").exists()
+
+
+def test_a_part_file_without_a_note_is_not_trusted(tmp_path):
+    folder = tmp_path / "lib" / "Big Bundle" / "Big Game"
+    folder.mkdir(parents=True)
+    (folder / "big.zip.part").write_bytes(b"left by an older version")
+    fake = FakeHumble(*one_big_file(), bodies={"big.zip": BIG})
+    library(tmp_path, fake, jobs=1).start()
+    assert (folder / "big.zip").read_bytes() == BIG
+    assert "Range" not in fake.cdn_gets[0][2]
+
+
+def test_adopting_a_file_clears_what_an_earlier_run_left(tmp_path):
+    folder = tmp_path / "lib" / "Big Bundle" / "Big Game"
+    folder.mkdir(parents=True)
+    (folder / "big.zip").write_bytes(BIG)
+    (folder / "big.zip.part").write_bytes(BIG[:100])
+    (folder / "big.zip.part.json").write_text('{"validator": "x"}')
+    library(tmp_path, FakeHumble(*one_big_file(), bodies={"big.zip": BIG}), jobs=1).start()
+    assert sorted(p.name for p in folder.iterdir()) == ["big.zip"]

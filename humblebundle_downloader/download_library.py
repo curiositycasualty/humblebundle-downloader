@@ -107,6 +107,42 @@ def _digest_of(algorithm, hasher):
     return {algorithm: hasher.hexdigest()}
 
 
+def _resume_note(part_file):
+    """Beside a part file: what the server called the file it came from"""
+    return part_file + ".json"
+
+
+def _write_resume_note(part_file, validator):
+    """Record the validator a later run needs to carry on safely. With
+    no validator there is no safe way to, so there is no note, and the
+    part file is not kept"""
+    note = _resume_note(part_file)
+    if not validator:
+        _remove_quietly(note)
+        return
+    try:
+        with open(note, "w") as handle:
+            json.dump({"validator": validator}, handle)
+    except OSError:
+        pass
+
+
+def _resume_point(part_file):
+    """(bytes held, validator) for a part file an earlier run left, or
+    None when there is nothing safe to carry on from"""
+    size = _file_size(part_file)
+    if not size:
+        return None
+    try:
+        with open(_resume_note(part_file)) as handle:
+            validator = json.load(handle).get("validator")
+    except (OSError, ValueError, AttributeError):
+        return None
+    if not isinstance(validator, str) or not validator:
+        return None
+    return size, validator
+
+
 def _feed_hash_from_file(hasher, path):
     """Re-read what is already on disk so a resumed transfer's hash
     covers the whole file, not just the part that arrived this time
@@ -2240,6 +2276,10 @@ class DownloadLibrary:
             "Already have {local_file}, recording it".format(local_file=local_file)
         )
         if self.dry_run is not True:
+            # Whatever an earlier run left half done is not needed now
+            _remove_quietly(local_file + ".part")
+            _remove_quietly(_resume_note(local_file + ".part"))
+        if self.dry_run is not True:
             self._update_cache_data(cache_file_key, {"adopted": True})
         return True
 
@@ -2418,7 +2458,28 @@ class DownloadLibrary:
         local_filename = job["local_filename"]
         cache_file_info = job["cache_file_info"]
 
-        remote_file_r = self._get_with_backoff(remote_file)
+        part_file = os.path.join(local_folder, local_filename) + ".part"
+        resume = None
+        held = _resume_point(part_file)
+        if held is not None:
+            already, validator = held
+            opened = self._reopen_for_resume(
+                remote_file, part_file, already, validator
+            )
+            if opened is not None:
+                remote_file_r, append, total = opened
+                resume = (append, already if append else 0, total)
+                if append:
+                    logger.info(
+                        "Picking {name} up from {size}, where an earlier run "
+                        "stopped".format(
+                            name=local_filename, size=_human_size(already)
+                        )
+                    )
+            else:
+                remote_file_r = None
+        else:
+            remote_file_r = self._get_with_backoff(remote_file)
         if remote_file_r is None:
             self._note_skip()
             self._record_failure(
@@ -2427,7 +2488,7 @@ class DownloadLibrary:
             return False
 
         # Check to see if the file still exists
-        if remote_file_r.status_code != 200:
+        if remote_file_r.status_code not in (200, 206):
             logger.debug(
                 "File unavailable {remote_file} status code {status_code}".format(
                     remote_file=remote_file, status_code=remote_file_r.status_code
@@ -2501,6 +2562,7 @@ class DownloadLibrary:
             remote_file=remote_file,
             hashes=job.get("hashes"),
             listed_size=job.get("listed_size"),
+            resume=resume,
         )
 
     def _process_download(
@@ -2513,6 +2575,7 @@ class DownloadLibrary:
         remote_file=None,
         hashes=None,
         listed_size=None,
+        resume=None,
     ):
         started = time.time()
         # Content lands in <file>.part and is only moved into place once
@@ -2528,17 +2591,20 @@ class DownloadLibrary:
             written, digests = self._download_to_part(
                 open_r, part_file, remote_file, local_filename, hashes,
                 listed_size=listed_size,
+                resume=resume,
             )
             # Recorded so a later run can tell a file that changed on
             # disk from one that changed upstream
             file_info.update(digests)
             os.replace(part_file, local_filename)
+            _remove_quietly(_resume_note(part_file))
 
         except (Exception, KeyboardInterrupt) as e:
             if self._show_bar:
                 # Do not overwrite the progress bar on next print
                 print()
 
+            stopped = isinstance(e, (Interrupted, KeyboardInterrupt))
             if isinstance(e, Interrupted):
                 # Asked to stop, so this is not a failure worth shouting,
                 # but how far it got and how fast is worth a line
@@ -2546,10 +2612,11 @@ class DownloadLibrary:
                     local_filename,
                     _file_size(part_file),
                     time.time() - started,
-                    total=_coerce_size(
+                    total=_content_range_total(open_r) or _coerce_size(
                         (getattr(open_r, "headers", None) or {}).get("Content-Length")
                     ),
                     stopped=True,
+                    resumable=os.path.exists(_resume_note(part_file)),
                 )
             else:
                 logger.error(
@@ -2562,9 +2629,13 @@ class DownloadLibrary:
             self._progress.file_finished(label, ok=False)
             self._progress.clear()
 
-            # Clean up the partial transfer. Any previously downloaded
-            # copy of the file is left untouched
-            _remove_quietly(part_file)
+            # A stopped transfer keeps what it has, for the next run to
+            # carry on from. A failed one is thrown away: what it holds
+            # is not to be trusted. Any previously downloaded copy of
+            # the file is left untouched either way
+            if not stopped or not os.path.exists(_resume_note(part_file)):
+                _remove_quietly(part_file)
+                _remove_quietly(_resume_note(part_file))
 
             if type(e).__name__ == "KeyboardInterrupt":
                 # A worker cannot exit the process, so flag it and let
@@ -2601,7 +2672,7 @@ class DownloadLibrary:
         return result
 
     def _log_finished(self, local_filename, done, elapsed, total=None,
-                      stopped=False):
+                      stopped=False, resumable=False):
         """One line per file once it is over: how much, how long, and how
         fast on average, whether it finished or was stopped part way.
         The progress block, when there is one, keeps it above itself
@@ -2630,6 +2701,8 @@ class DownloadLibrary:
             line = "Stopped {name} after {done} in {elapsed:.1f}s{speed}".format(
                 name=name, done=_human_size(done), elapsed=elapsed, speed=speed
             )
+        if stopped and resumable and done:
+            line += "; the next run carries on from there"
         logger.info(line)
 
     def _hash_algorithm(self, hashes):
@@ -2646,7 +2719,8 @@ class DownloadLibrary:
         return None
 
     def _download_to_part(self, response, part_file, remote_file,
-                          local_filename, hashes=None, listed_size=None):
+                          local_filename, hashes=None, listed_size=None,
+                          resume=None):
         """Stream into the part file, picking the transfer back up where
         it broke off when the server allows it.
 
@@ -2658,9 +2732,13 @@ class DownloadLibrary:
             "Downloading: {local_filename}".format(local_filename=local_filename)
         )
 
-        append = False
-        already = 0
-        total = _coerce_size(response.headers.get("Content-Length"))
+        if resume is not None:
+            # Carrying on from an earlier run's part file
+            append, already, total = resume
+        else:
+            append = False
+            already = 0
+            total = _coerce_size(response.headers.get("Content-Length"))
         attempt = 0
         label = os.path.basename(local_filename)
 
@@ -2671,8 +2749,18 @@ class DownloadLibrary:
         validator = _validator_for(response)
         algorithm = self._hash_algorithm(hashes)
         hasher = hashlib.new(algorithm) if algorithm else None
+        if hasher is not None and append and already:
+            # The hash has to cover the bytes an earlier run fetched too
+            _feed_hash_from_file(hasher, part_file)
+
+        # Written as the transfer starts, not when it stops: a second
+        # Ctrl+C ends the process on the spot, and the part file it
+        # leaves is only resumable if this is already there
+        _write_resume_note(part_file, validator)
 
         self._progress.file_started(label, total)
+        if already:
+            self._progress.file_progress(label, already)
 
         while True:
             try:
