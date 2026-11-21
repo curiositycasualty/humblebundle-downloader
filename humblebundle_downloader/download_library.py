@@ -35,6 +35,8 @@ DEFAULT_COOLDOWN = 30
 
 # Conventional exit status for "killed by SIGINT"
 INTERRUPT_EXIT_CODE = 130
+# Longest the cache goes unwritten while files are being recorded
+CACHE_FLUSH_SECONDS = 5.0
 # How long a first Ctrl-C waits for transfers to wind themselves up.
 # Ordinary transfers stop at their next chunk, well inside a second, so
 # this is only ever spent on one stuck somewhere it cannot notice
@@ -1001,6 +1003,10 @@ class DownloadLibrary:
         self._workers = []
         self._stop = threading.Event()
         self._cache_lock = threading.Lock()
+        # The cache is written at most every CACHE_FLUSH_SECONDS, and
+        # once more when the run ends, rather than after every file
+        self._cache_dirty = False
+        self._cache_written_at = 0.0
         self._thread_local = threading.local()
 
         # A 429 seen by any one worker pauses all of them: retrying per
@@ -1223,6 +1229,11 @@ class DownloadLibrary:
                 logger.warning("Interrupted, nothing further was downloaded")
                 sys.exit(INTERRUPT_EXIT_CODE)
         finally:
+            # However the run ends, what it learned is kept
+            try:
+                self._flush_cache()
+            except Exception as error:
+                logger.error("Could not save the cache: {0}".format(error))
             self._restore_interrupt_handler(previous_handler)
 
         if self.dry_run is True:
@@ -1276,6 +1287,10 @@ class DownloadLibrary:
         it would wait for can keep us here. Part files are left where
         they are and the next run truncates them.
         """
+        try:
+            self._flush_cache(wait=2)
+        except Exception:
+            pass
         for stream in (sys.stdout, sys.stderr):
             try:
                 stream.flush()
@@ -2032,21 +2047,47 @@ class DownloadLibrary:
             )
 
     def _update_cache_data(self, cache_file_key, file_info):
-        # Update cache file with newest data so if the script
-        # quits it can keep track of the progress.
-        # The whole file is rewritten each time, so the mutation and the
-        # write are held together under one lock: without it, parallel
-        # jobs interleave and truncate each other's json
+        """Record a file in the cache, writing it out now and then.
+
+        Rewriting the whole file after every download meant thousands of
+        full rewrites of a growing file, each flushed to disk, with every
+        other worker waiting on it: gigabytes of writes over a large
+        library, and a first run adopting files back to back did nothing
+        else. Now it is written at most every CACHE_FLUSH_SECONDS, and
+        once more when the run ends however it ends. A run killed outright
+        loses those last seconds of entries, for files that are complete
+        on disk, which the next run recognises and records without
+        downloading them again
+        """
         with self._cache_lock:
             self.cache_data[cache_file_key] = file_info
-            self._write_cache_data()
+            self._cache_dirty = True
+            if time.time() - self._cache_written_at >= CACHE_FLUSH_SECONDS:
+                self._flush_cache_locked()
+
+    def _flush_cache(self, wait=None):
+        """Write the cache out if anything has changed since it last was.
+        wait bounds how long to wait for the lock, for a run leaving in a
+        hurry; past it the write is skipped rather than hanging
+        """
+        if not self._cache_lock.acquire(timeout=-1 if wait is None else wait):
+            return
+        try:
+            if self._cache_dirty:
+                self._flush_cache_locked()
+        finally:
+            self._cache_lock.release()
+
+    def _flush_cache_locked(self):
+        self._write_cache_data()
+        self._cache_dirty = False
+        self._cache_written_at = time.time()
 
     def _write_cache_data(self):
         """Write somewhere else, then rename over the top.
 
-        The whole file is rewritten after every single download, so
-        writing in place leaves a window in which the cache is half
-        written. A run killed in that window, which is exactly what a
+        The whole file is rewritten each time, so writing in place
+        leaves a window in which the cache is half written. A run killed in that window, which is exactly what a
         second Ctrl-C does, used to leave a truncated or empty
         .cache.json that the next run could not read at all. os.replace
         is atomic, so what is on disk is always one whole version or the

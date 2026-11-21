@@ -541,3 +541,23 @@ def test_a_file_without_a_listed_sha1_says_so(tmp_path, capsys):
     library(tmp_path, fake, dry_run=True, print_checksums=True, purchase_keys=["b2"]).start()
     out = capsys.readouterr().out
     assert "# no sha1 listed: " + os.path.join("Bundle Two", "Game", "game.exe") in out
+
+
+def test_files_finished_before_a_run_fails_are_still_saved_to_the_cache(tmp_path):
+    entries, pages = two_bundles()
+    holder = {}
+
+    def sign(ids):
+        if "e3" in ids:
+            return {"ok": False, "code": "not_authenticated"}
+        return FakeHumble._sign(holder["fake"], ids)
+
+    fake = FakeHumble(entries, pages)
+    holder["fake"] = fake
+    fake._sign_reply = None
+    fake.signer = sign
+    with pytest.raises(NotSignedIn):
+        library(tmp_path, fake, jobs=1).start()
+    saved = cache_of(tmp_path)
+    assert {"b1:one.pdf", "b1:one.epub", "b1:two.pdf"} <= set(saved)
+    assert "b2:game.exe" not in saved

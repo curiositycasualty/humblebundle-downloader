@@ -440,6 +440,7 @@ def test_cache_file_stays_valid_under_concurrent_writes(tmp_path):
         thread.start()
     for thread in threads:
         thread.join()
+    dl._flush_cache()
 
     with open(dl.cache_file) as handle:
         written = json.load(handle)
@@ -1357,8 +1358,9 @@ def test_a_failed_write_leaves_the_previous_cache_alone(tmp_path, monkeypatch):
         raise OSError("disk went away")
 
     monkeypatch.setattr(json, "dump", explode)
+    dl._update_cache_data("k:two", {"url_last_modified": "second"})
     with pytest.raises(OSError):
-        dl._update_cache_data("k:two", {"url_last_modified": "second"})
+        dl._flush_cache()
 
     with open(dl.cache_file) as handle:
         assert json.load(handle) == {"k:one": {"url_last_modified": "first"}}
@@ -1898,3 +1900,77 @@ def test_speed_is_left_off_rather_than_divided_by_zero(caplog):
     dl = DownloadLibrary("x")
     dl._log_finished("/a/b.pdf", 1000, 0.0)
     assert _finished_lines(caplog) == ["Downloaded b.pdf: 1000 B in 0.0s"]
+
+
+###
+# cache writes, batched
+###
+def _counting(dl, monkeypatch):
+    writes = []
+    real = dl._write_cache_data
+    monkeypatch.setattr(dl, "_write_cache_data", lambda: (writes.append(1), real()))
+    return writes
+
+
+def test_the_cache_is_not_rewritten_after_every_file(tmp_path, monkeypatch):
+    dl = DownloadLibrary(str(tmp_path))
+    dl.cache_file = str(tmp_path / ".cache.json")
+    dl.cache_data = {}
+    writes = _counting(dl, monkeypatch)
+    for i in range(500):
+        dl._update_cache_data("k:{0}".format(i), {"adopted": True})
+    # The first goes straight out; the rest wait for the interval
+    assert len(writes) == 1
+    dl._flush_cache()
+    assert len(writes) == 2
+    with open(dl.cache_file) as handle:
+        assert len(json.load(handle)) == 500
+    # Nothing new, nothing written
+    dl._flush_cache()
+    assert len(writes) == 2
+
+
+def test_the_cache_is_written_again_once_the_interval_passes(tmp_path, monkeypatch):
+    import humblebundle_downloader.download_library as module
+
+    now = [1000.0]
+    monkeypatch.setattr(module.time, "time", lambda: now[0])
+    dl = DownloadLibrary(str(tmp_path))
+    dl.cache_file = str(tmp_path / ".cache.json")
+    dl.cache_data = {}
+    writes = _counting(dl, monkeypatch)
+    dl._update_cache_data("k:1", {})
+    now[0] += module.CACHE_FLUSH_SECONDS - 0.1
+    dl._update_cache_data("k:2", {})
+    assert len(writes) == 1
+    now[0] += 0.2
+    dl._update_cache_data("k:3", {})
+    assert len(writes) == 2
+
+
+def test_a_hard_exit_saves_the_cache_first(tmp_path, monkeypatch):
+    dl = DownloadLibrary(str(tmp_path))
+    dl.cache_file = str(tmp_path / ".cache.json")
+    dl.cache_data = {}
+    dl._update_cache_data("k:first", {})
+    dl._update_cache_data("k:pending", {})
+    exits = []
+    monkeypatch.setattr(os, "_exit", lambda code: exits.append(code))
+    dl._hard_exit()
+    assert exits == [130]
+    with open(dl.cache_file) as handle:
+        assert set(json.load(handle)) == {"k:first", "k:pending"}
+
+
+def test_a_hard_exit_does_not_wait_forever_on_a_stuck_cache(tmp_path, monkeypatch):
+    dl = DownloadLibrary(str(tmp_path))
+    dl.cache_file = str(tmp_path / ".cache.json")
+    dl._cache_dirty = True
+    dl._cache_lock.acquire()          # held by something stuck
+    monkeypatch.setattr(os, "_exit", lambda code: None)
+    started = time.time()
+    try:
+        dl._hard_exit()
+    finally:
+        dl._cache_lock.release()
+    assert time.time() - started < 5

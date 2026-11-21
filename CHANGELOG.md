@@ -3,6 +3,11 @@
 
 ## Unreleased
 
+- The cache is now written at most every five seconds, and once more when the run ends however it
+  ends, instead of being rewritten in full and flushed to disk after every file. Over a large
+  library that was gigabytes of writes, with every other download waiting on each one. A run killed
+  outright loses at most those few seconds of entries, for files that are complete on disk and are
+  recognised on the next run
 - Fixed every download failing its checksum against the rebuilt site. Humble's listing gives the
   size and checksums of an older version of many files than its servers now send, so each new
   edition was rejected and downloaded again until it ran out of retries, and nothing was saved. A
