@@ -268,6 +268,25 @@ gives no checksum for are downloaded and kept exactly as before.
 This is the backstop for the resume case above: `If-Range` is what prevents a mismatched splice,
 and the checksum is what catches one if a server ignores it. `--no-verify` turns the checking off.
 
+Humble replaces files now and then, a new edition or a better scan, without always updating the
+size and checksums it lists for them. Such a file arrives whole, at its new size, and cannot match
+the old checksum. So a file that does not match, but arrived complete at a different size from the
+listing, is taken to be a newer version rather than damage: it is kept, its own checksum recorded,
+and a warning names it, with a count at the end of the run. A file at the listed size that does not
+match is damaged, and is retried as above. The same goes for files already on disk from before:
+one at a different size from the listing is recognised if the server says that is its size now.
+Because sizes come from the listing, `--dry-run` totals can be a little out for replaced files.
+
+`--print-checksums` prints the sha1 Humble lists for every file a run would download, to stdout,
+in the format `shasum -c` reads, with paths relative to the library. It works with `--dry-run`:
+
+```
+hbd ... --dry-run --print-checksums > SHA1SUMS
+cd "<library>" && shasum -c ../SHA1SUMS
+```
+
+Files Humble has since replaced will not match their listing, for the reason above.
+
 
 ### 7. Picking one format per item
 

@@ -3,6 +3,15 @@
 
 ## Unreleased
 
+- Fixed every download failing its checksum against the rebuilt site. Humble's listing gives the
+  size and checksums of an older version of many files than its servers now send, so each new
+  edition was rejected and downloaded again until it ran out of retries, and nothing was saved. A
+  file that arrives complete at a different size from the listing is now kept as a newer version,
+  with its own checksum recorded and a warning; one at the listed size that does not match is still
+  treated as damaged. Files on disk that are such newer versions are recognised with one `HEAD`
+  request instead of being downloaded again
+- Added `--print-checksums`, which prints the sha1 Humble lists for each file to be downloaded in
+  the format `shasum -c` reads, with or without `--dry-run`
 - The mouse now reaches the cheese at 90% and eats it over the last tenth, until at 100% there is
   none left
 - Styles that leave the bar at 100% now also enter it: at 0% the track is empty, and from 1% the

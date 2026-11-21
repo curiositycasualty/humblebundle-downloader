@@ -947,6 +947,7 @@ class DownloadLibrary:
         update=False,
         dry_run=False,
         print_urls=False,
+        print_checksums=False,
         jobs=1,
         retries=5,
         verify=True,
@@ -1047,6 +1048,8 @@ class DownloadLibrary:
         self.update = update
         self.dry_run = dry_run
         self.print_urls = print_urls
+        self.print_checksums = print_checksums
+        self._checksum_header_done = False
 
         # Tally of everything a real run would fetch, filled in by
         # _record_pending_download while self.dry_run is True
@@ -1058,6 +1061,8 @@ class DownloadLibrary:
         # not know about, which is every file after the site rebuild:
         # bundles are keyed by new ids, so no old cache entry matches
         self.adopted_count = 0
+        # Files Humble has replaced without updating its listing
+        self.stale_listings = 0
 
         # The library as the rebuilt website presents it. Built in
         # start(), once the session has its cookies
@@ -1230,6 +1235,15 @@ class DownloadLibrary:
                 "{rate}/s, with {limit}: -j {limit} is a good fixed "
                 "setting for this connection".format(
                     now=self._gate.limit, rate=_human_size(rate), limit=limit
+                )
+            )
+
+        if self.stale_listings:
+            logger.warning(
+                "{count} file(s) were a different version from the one "
+                "Humble lists, so did not match its checksums. They were "
+                "kept, and their own checksums recorded in the cache".format(
+                    count=self.stale_listings
                 )
             )
 
@@ -2076,9 +2090,10 @@ class DownloadLibrary:
         local_file = os.path.join(local_folder, local_filename)
 
         if cache_file_info == {} and self._adopt(
-            cache_file_key, local_file, file_size
+            cache_file_key, local_file, file_size, remote_file
         ):
             raise FileExistsError
+
         if not self._claim(local_file):
             logger.debug(
                 "Already handled {local_file} this run".format(
@@ -2086,6 +2101,8 @@ class DownloadLibrary:
                 )
             )
             raise FileExistsError
+
+        self._print_checksum(local_file, hashes)
 
         if self.dry_run is True:
             self._check_pending_download(
@@ -2103,6 +2120,7 @@ class DownloadLibrary:
             "local_filename": local_filename,
             "cache_file_info": cache_file_info,
             "hashes": hashes or {},
+            "listed_size": file_size,
         }
 
         self._progress.file_queued()
@@ -2115,7 +2133,7 @@ class DownloadLibrary:
 
         return self._run_download_job(job)
 
-    def _adopt(self, cache_file_key, local_file, file_size):
+    def _adopt(self, cache_file_key, local_file, file_size, remote_file=None):
         """Take a file already on disk as downloaded, when the cache has
         never heard of it but it is exactly the size it should be.
 
@@ -2132,10 +2150,19 @@ class DownloadLibrary:
         if not file_size:
             return False
         try:
-            if os.path.getsize(local_file) != file_size:
-                return False
+            on_disk = os.path.getsize(local_file)
         except OSError:
             return False
+        if on_disk != file_size:
+            # Perhaps a newer version than Humble lists, which is what
+            # the server sends now. One HEAD request costs far less than
+            # downloading it again to find out
+            if remote_file is None or not on_disk:
+                return False
+            headers = self._get_remote_headers(remote_file)
+            served = _coerce_size((headers or {}).get("Content-Length"))
+            if served != on_disk:
+                return False
 
         self.adopted_count += 1
         logger.debug(
@@ -2394,6 +2421,7 @@ class DownloadLibrary:
             rename_str=last_modified,
             remote_file=remote_file,
             hashes=job.get("hashes"),
+            listed_size=job.get("listed_size"),
         )
 
     def _process_download(
@@ -2405,6 +2433,7 @@ class DownloadLibrary:
         rename_str=None,
         remote_file=None,
         hashes=None,
+        listed_size=None,
     ):
         started = time.time()
         # Content lands in <file>.part and is only moved into place once
@@ -2418,7 +2447,8 @@ class DownloadLibrary:
                 self._rename_old_file(local_filename, rename_str)
 
             written, digests = self._download_to_part(
-                open_r, part_file, remote_file, local_filename, hashes
+                open_r, part_file, remote_file, local_filename, hashes,
+                listed_size=listed_size,
             )
             # Recorded so a later run can tell a file that changed on
             # disk from one that changed upstream
@@ -2536,7 +2566,7 @@ class DownloadLibrary:
         return None
 
     def _download_to_part(self, response, part_file, remote_file,
-                          local_filename, hashes=None):
+                          local_filename, hashes=None, listed_size=None):
         """Stream into the part file, picking the transfer back up where
         it broke off when the server allows it.
 
@@ -2569,7 +2599,11 @@ class DownloadLibrary:
                 self._stream_to_file(
                     response, part_file, append, already, total, label, hasher
                 )
-                self._check_digest(algorithm, hasher, hashes, label)
+                try:
+                    self._check_digest(algorithm, hasher, hashes, label)
+                except ChecksumMismatch:
+                    if not self._listing_is_stale(label, part_file, listed_size):
+                        raise
                 return _file_size(part_file), _digest_of(algorithm, hasher)
             except (KeyboardInterrupt, Interrupted):
                 # Shutting down: nothing to resume, nothing to report
@@ -2623,6 +2657,56 @@ class DownloadLibrary:
                 # A resume changes what the whole file weighs
                 self._progress.file_started(label, total)
                 self._progress.file_progress(label, already)
+
+    def _print_checksum(self, local_file, hashes):
+        """The checksum Humble lists for a file about to be downloaded, as
+        shasum -c reads it, to stdout like --print-urls. Paths are
+        relative to the library, so the list checks from inside it
+        """
+        if not self.print_checksums:
+            return
+        path = os.path.relpath(local_file, self.library_path)
+        sha1 = (hashes or {}).get("sha1")
+        with self._notice_lock:
+            header = not self._checksum_header_done
+            self._checksum_header_done = True
+        with self._progress.printing():
+            if header:
+                print(
+                    "# sha1 as Humble lists them. To check, from inside the "
+                    "library: shasum -c <this list>. A file Humble has "
+                    "replaced since will not match its listing"
+                )
+            if sha1:
+                print("{sha1}  {path}".format(sha1=sha1, path=path))
+            else:
+                print("# no sha1 listed: {path}".format(path=path))
+
+    def _listing_is_stale(self, label, part_file, listed_size):
+        """Whether a checksum that does not match is Humble's listing
+        being out of date rather than the download being damaged.
+
+        Humble replaces files (a new edition, a fixed scan) without always
+        updating the size and checksums listed for them. The file arrives
+        whole, at its new size, and is checked against the old one's
+        checksum. A file at the listed size that does not match is
+        damaged; one at a different size is a different file
+        """
+        arrived = _file_size(part_file)
+        if not listed_size or arrived == listed_size:
+            return False
+        with self._notice_lock:
+            self.stale_listings += 1
+        logger.warning(
+            "{name} is not the version Humble lists ({listed}, the server "
+            "sent {arrived}): keeping what the server sent, with its own "
+            "checksum".format(
+                name=label,
+                listed=_human_size(listed_size),
+                arrived=_human_size(arrived),
+            )
+        )
+        return True
 
     @staticmethod
     def _check_digest(algorithm, hasher, hashes, label):

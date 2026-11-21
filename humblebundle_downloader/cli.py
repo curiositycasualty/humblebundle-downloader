@@ -171,6 +171,14 @@ def parse_args(args):
         ),
     )
     parser.add_argument(
+        "--print-checksums",
+        action="store_true",
+        help=(
+            "Print the sha1 Humble lists for each file to be downloaded, to "
+            "stdout, in the format shasum -c reads. Works with --dry-run"
+        ),
+    )
+    parser.add_argument(
         "-f",
         "--prefer-format",
         type=str,
@@ -261,6 +269,7 @@ def cli():
             update=cli_args.update,
             dry_run=cli_args.dry_run,
             print_urls=cli_args.print_urls,
+            print_checksums=cli_args.print_checksums,
             progress_style=cli_args.progress_style,
             train_per_download=cli_args.train_per_download,
             jobs=jobs,

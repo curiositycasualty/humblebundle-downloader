@@ -2,6 +2,7 @@
 a fake site and a fake CDN"""
 import json
 import hashlib
+import os
 import threading
 
 import pytest
@@ -440,3 +441,103 @@ def test_a_cookie_file_keeps_session_cookies(tmp_path):
     assert sorted(c.name for c in dl.session.cookies) == [
         "long_lived", "session_blank", "session_zero",
     ]
+
+
+###
+# Humble's listing out of date
+###
+NEWER = b"a newer edition of the second book, rescanned " * 40
+
+
+def test_a_newer_file_than_the_listing_is_kept_not_retried(tmp_path, caplog):
+    import logging
+
+    caplog.set_level(logging.WARNING)
+    entries, pages = two_bundles()
+    fake = FakeHumble(entries, pages, bodies=dict(BODIES, **{"two.pdf": NEWER}))
+    dl = library(tmp_path, fake, jobs=1, purchase_keys=["b1"])
+    dl.start()
+
+    saved = tmp_path / "lib" / "Bundle One" / "Book Two" / "two.pdf"
+    assert saved.read_bytes() == NEWER
+    assert [n for n, _, _ in fake.cdn_gets].count("two.pdf") == 1
+    entry = cache_of(tmp_path)["b1:two.pdf"]
+    assert entry["sha1"] == hashlib.sha1(NEWER).hexdigest()
+    assert dl.stale_listings == 1
+    assert "not the version Humble lists" in caplog.text
+    assert "1 file(s) were a different version" in caplog.text
+
+
+def test_a_damaged_file_at_the_listed_size_is_still_rejected(tmp_path):
+    entries, pages = two_bundles()
+    damaged = b"z" * len(BODIES["two.pdf"])
+    fake = FakeHumble(entries, pages, bodies=dict(BODIES, **{"two.pdf": damaged}))
+    dl = library(tmp_path, fake, jobs=1, purchase_keys=["b1"], retries=1)
+    dl.start()
+    assert not (tmp_path / "lib" / "Bundle One" / "Book Two" / "two.pdf").exists()
+    assert dl.stale_listings == 0
+
+
+def test_a_newer_edition_already_on_disk_is_adopted_after_one_head(tmp_path):
+    entries, pages = two_bundles()
+    fake = FakeHumble(entries, pages, bodies=dict(BODIES, **{"two.pdf": NEWER}))
+    have = tmp_path / "lib" / "Bundle One" / "Book Two" / "two.pdf"
+    have.parent.mkdir(parents=True)
+    have.write_bytes(NEWER)
+
+    dl = library(tmp_path, fake, jobs=1, purchase_keys=["b1"])
+    dl.start()
+    assert "two.pdf" not in fake.streamed
+    assert cache_of(tmp_path)["b1:two.pdf"] == {"adopted": True}
+    assert dl.adopted_count == 1
+
+
+def test_a_file_on_disk_matching_neither_is_downloaded_again(tmp_path):
+    entries, pages = two_bundles()
+    fake = FakeHumble(entries, pages, bodies=dict(BODIES, **{"two.pdf": NEWER}))
+    have = tmp_path / "lib" / "Bundle One" / "Book Two" / "two.pdf"
+    have.parent.mkdir(parents=True)
+    have.write_bytes(b"half a file")
+    library(tmp_path, fake, jobs=1, purchase_keys=["b1"]).start()
+    assert have.read_bytes() == NEWER
+
+
+###
+# --print-checksums
+###
+def test_print_checksums_lists_what_humble_expects(tmp_path, capsys):
+    fake = FakeHumble(*two_bundles())
+    library(tmp_path, fake, dry_run=True, print_checksums=True).start()
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0].startswith("# sha1 as Humble lists them")
+    listed = dict(line.split("  ", 1)[::-1] for line in lines[1:])
+    assert listed == {
+        os.path.join("Bundle One", "Book One", "one.pdf"): hashlib.sha1(BODIES["one.pdf"]).hexdigest(),
+        os.path.join("Bundle One", "Book One", "one.epub"): hashlib.sha1(BODIES["one.epub"]).hexdigest(),
+        os.path.join("Bundle One", "Book Two", "two.pdf"): hashlib.sha1(BODIES["two.pdf"]).hexdigest(),
+        os.path.join("Bundle Two", "Game", "game.exe"): hashlib.sha1(BODIES["game.exe"]).hexdigest(),
+    }
+
+
+def test_printed_checksums_verify_the_downloaded_files(tmp_path, capsys):
+    import subprocess
+
+    fake = FakeHumble(*two_bundles())
+    library(tmp_path, fake, jobs=2, print_checksums=True).start()
+    listing = tmp_path / "SHA1SUMS"
+    listing.write_text(capsys.readouterr().out)
+    tool = ["shasum", "-c"] if subprocess.call(["which", "shasum"], stdout=subprocess.DEVNULL) == 0 else ["sha1sum", "-c"]
+    result = subprocess.run(tool + [str(listing)], cwd=tmp_path / "lib", capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.count(": OK") == 4
+
+
+def test_a_file_without_a_listed_sha1_says_so(tmp_path, capsys):
+    entries, pages = two_bundles()
+    pages["/home/library/b2"] = pages["/home/library/b2"].replace(
+        '"sha1": "' + hashlib.sha1(BODIES["game.exe"]).hexdigest() + '"', '"sha1": null'
+    )
+    fake = FakeHumble(entries, pages)
+    library(tmp_path, fake, dry_run=True, print_checksums=True, purchase_keys=["b2"]).start()
+    out = capsys.readouterr().out
+    assert "# no sha1 listed: " + os.path.join("Bundle Two", "Game", "game.exe") in out
