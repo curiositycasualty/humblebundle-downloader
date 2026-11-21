@@ -958,3 +958,58 @@ def test_a_preferred_format_needs_no_sizes_at_all(tmp_path):
     dl.start()
     assert [os.path.basename(p["local_file"]) for p in dl.pending_downloads] == ["wytches.pdf"]
     assert fake.cdn_gets == [] and fake.sign_calls == []
+
+
+###
+# -f largest
+###
+def picked(dl):
+    return [os.path.basename(p["local_file"]) for p in dl.pending_downloads]
+
+
+def test_largest_takes_the_biggest_by_what_is_served(tmp_path, caplog):
+    import logging
+
+    caplog.set_level(logging.INFO)
+    fake = two_formats(3000, 1000, b"p" * 900, b"c" * 1000)
+    dl = library(tmp_path, fake, dry_run=True, prefer_format=["largest"])
+    dl.start()
+    assert picked(dl) == ["wytches.cbz"]
+    assert "taking the largest file (cbz 1000 B, pdf 900 B)" in caplog.text
+    assert "no preferred format" not in caplog.text
+
+
+def test_largest_is_case_insensitive(tmp_path):
+    fake = two_formats(3000, 1000, b"p" * 1100, b"c" * 1000)
+    dl = library(tmp_path, fake, dry_run=True, prefer_format=["LARGEST"])
+    dl.start()
+    assert picked(dl) == ["wytches.pdf"]
+
+
+def test_a_format_before_largest_wins_when_offered(tmp_path):
+    fake = two_formats(3000, 1000, b"p" * 1100, b"c" * 1000)
+    dl = library(tmp_path, fake, dry_run=True, prefer_format=["cbz", "largest"])
+    dl.start()
+    assert picked(dl) == ["wytches.cbz"]
+    assert fake.cdn_gets == [] and fake.sign_calls == []
+
+
+def test_largest_stops_the_search_before_later_formats(tmp_path):
+    fake = two_formats(3000, 1000, b"p" * 900, b"c" * 1000)
+    dl = library(tmp_path, fake, dry_run=True, prefer_format=["epub", "largest", "pdf"])
+    dl.start()
+    assert picked(dl) == ["wytches.cbz"]
+
+
+def test_largest_with_one_file_asks_the_server_nothing(tmp_path):
+    fake = two_formats(3000, 1000, b"p" * 900, b"c" * 1000)
+    dl = library(tmp_path, fake, dry_run=True, prefer_format=["largest"], ext_exclude=["pdf"])
+    dl.start()
+    assert picked(dl) == ["wytches.cbz"]
+    assert fake.cdn_gets == [] and fake.sign_calls == []
+
+
+def test_largest_downloads_only_the_one(tmp_path):
+    fake = two_formats(3000, 1000, b"p" * 1100, b"c" * 1000)
+    library(tmp_path, fake, jobs=1, prefer_format=["largest"]).start()
+    assert files_under(tmp_path / "lib") == ["Comics/Wytches/wytches.pdf"]

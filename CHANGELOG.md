@@ -3,6 +3,9 @@
 
 ## 0.5.0
 
+- `largest` can be given to `--prefer-format`: `-f largest` takes the biggest file of each item
+  whatever its format, and `-f cbz largest` the `.cbz` if there is one, otherwise the biggest.
+  Sizes are judged by what the server sends, as for the fallback
 - `--prefer-format`'s fallback, when none of the preferred formats is offered, now takes the
   largest file by what the server sends, asking with one `HEAD` per format, rather than by
   Humble's listed sizes, which for regenerated files are the old ones

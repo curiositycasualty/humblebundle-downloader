@@ -37,6 +37,8 @@ DEFAULT_COOLDOWN = 30
 INTERRUPT_EXIT_CODE = 130
 # Below this fraction of the size it replaces, or of the size Humble
 # lists, a file counts as much smaller: likely more heavily compressed
+# --prefer-format keyword: the biggest file, whatever its format
+LARGEST = "largest"
 SMALLER_RATIO = 0.75
 # In the library, the running list of such files
 SMALLER_REPORT = ".hbd-smaller-than-listed.tsv"
@@ -1745,6 +1747,10 @@ class DownloadLibrary:
             return passthrough + [entry[0] for entry in candidates]
 
         for wanted in self.prefer_format:
+            if wanted == LARGEST:
+                return passthrough + self._take_largest(
+                    candidates, product_title, platform, LARGEST
+                )
             chosen = [entry for entry in candidates if entry[2] == wanted]
             if chosen:
                 self._log_format_choice(
@@ -1752,15 +1758,21 @@ class DownloadLibrary:
                 )
                 return passthrough + [entry[0] for entry in chosen]
 
-        # No preferred format available, so take the biggest file there
-        # is, by what the server sends now rather than what Humble lists
+        # No preferred format available, so take the biggest file there is
+        return passthrough + self._take_largest(
+            candidates, product_title, platform, None
+        )
+
+    def _take_largest(self, candidates, product_title, platform, wanted):
+        """The biggest of the candidates, by what the server sends now
+        rather than what Humble lists"""
         sizes = [self._real_size(entry[0], entry[1]) for entry in candidates]
         biggest = max(range(len(candidates)), key=lambda i: sizes[i] or 0)
         largest = candidates[biggest]
         self._log_format_choice(
-            product_title, platform, None, candidates, [largest], sizes
+            product_title, platform, wanted, candidates, [largest], sizes
         )
-        return passthrough + [largest[0]]
+        return [largest[0]]
 
     def _real_size(self, file_type, filename):
         """A file's size as the server has it now.
@@ -1794,8 +1806,11 @@ class DownloadLibrary:
         ]
         if not dropped:
             return
-        if wanted is None:
-            reason = "no preferred format available, taking the largest file"
+        if wanted in (None, LARGEST):
+            if wanted is None:
+                reason = "no preferred format available, taking the largest file"
+            else:
+                reason = "taking the largest file"
             if sizes and all(sizes):
                 reason += " ({0})".format(", ".join(
                     "{0} {1}".format(entry[2] or entry[1], _human_size(size))

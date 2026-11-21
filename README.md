@@ -22,7 +22,7 @@ After that it will only download the content that has been updated or is missing
 - optional listing of the url of every file being collected _(`--print-urls` flag)_
 - optional filter by file types using an include _or_ exclude list _(`--include/--exclude` flag)_
 - optional filter by platform types like video, ebook, etc... _(`--platform` flag)_
-- optional single format per item, with an ordered preference and a largest-file fallback _(`--prefer-format` flag)_
+- optional single format per item, with an ordered preference and a largest-file fallback, or just the largest file _(`--prefer-format` flag, `-f largest`)_
 
 
 ## Install
@@ -330,6 +330,16 @@ The extensions are tried **in order**, so the last one you list acts as the defa
 That last step is what stops an item disappearing when it ships in some format you did not think to
 list, like `.cbr` or `.djvu`.
 
+`largest` can go in the list too, and stands for the biggest file of whatever is offered:
+
+- `-f largest` always takes the biggest file, whatever its format
+- `-f cbz largest` takes the `.cbz` when there is one, otherwise the biggest file
+- anything after `largest` is never reached, since it always finds a file
+
+"Biggest" is judged by what the server sends now, not by Humble's listing (see below), so an item
+offered in more than one format costs one `HEAD` request per format. Items with only one file to
+choose from cost nothing.
+
 Selection happens per item **and per platform**, so a game that ships a Windows and a Linux build
 still gets one file for each, rather than one file overall.
 
@@ -360,7 +370,7 @@ those names would break it.
 
 Library entries that are keys for Steam, Epic, GOG and so on are left alone, as they always were.
 
-When none of the preferred formats is offered, the largest file is taken, by what the server sends
+When none of the preferred formats is offered, or the list says `largest`, the largest file is taken, by what the server sends
 now: one `HEAD` request per format settles it, since Humble's listed sizes are from before it
 regenerated its files, and can be three times what is sent.
 

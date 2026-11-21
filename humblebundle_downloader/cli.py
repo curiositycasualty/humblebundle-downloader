@@ -203,7 +203,9 @@ def parse_args(args):
         help=(
             "Only get one format per item, trying these extensions in "
             "order and falling back to the largest file when none of "
-            "them are available. Ex: -f cbz epub pdf"
+            "them are available. 'largest' takes the biggest file, "
+            "judged by what the server sends now. "
+            "Ex: -f cbz epub pdf, -f largest, -f cbz largest"
         ),
     )
     filter_ext = parser.add_mutually_exclusive_group()
