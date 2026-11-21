@@ -11,6 +11,7 @@ import signal
 import logging
 
 import io
+import re
 
 import pytest
 
@@ -1698,3 +1699,89 @@ def test_the_light_cycle_leaves_a_wall_of_light():
     assert _muncher_bar(1.0, 20, style, 1) == "[" + "━" * 15 + "O=`'o]"
     middle = _muncher_bar(0.5, 20, style, 0)
     assert middle.index("O") == 1 + middle.count("━")
+
+
+###
+# a line per file once it is over
+###
+class StopsPartWay(ChunkedResponse):
+    """Delivers some chunks, then asks the run to stop, as Ctrl+C does"""
+
+    def __init__(self, body, headers, dl, after):
+        ChunkedResponse.__init__(self, body, headers)
+        self.dl = dl
+        self.after = after
+
+    def iter_content(self, chunk_size=4096):
+        for n, chunk in enumerate(ChunkedResponse.iter_content(self, chunk_size)):
+            if n == self.after:
+                self.dl._stop.set()
+            yield chunk
+
+
+def _finished_lines(caplog):
+    return [
+        r.getMessage() for r in caplog.records
+        if r.getMessage().startswith(("Downloaded ", "Stopped "))
+    ]
+
+
+@pytest.mark.parametrize("jobs", [1, 4])
+def test_a_finished_file_reports_its_average_speed(tmp_path, caplog, jobs):
+    caplog.set_level(logging.INFO)
+    dl = DownloadLibrary(str(tmp_path), jobs=jobs)
+    dl.cache_file = str(tmp_path / ".cache.json")
+    dl.cache_data = {}
+    body = b"x" * 50000
+    assert dl._process_download(
+        ChunkedResponse(body, {"Content-Length": str(len(body))}),
+        "key", {}, str(tmp_path / "book.pdf"), remote_file="https://x/book.pdf",
+    )
+    lines = _finished_lines(caplog)
+    assert len(lines) == 1
+    assert re.match(
+        r"Downloaded book\.pdf: 48\.83 KiB in \d+\.\ds, avg [\d.]+ \S?i?B/s$", lines[0]
+    ), lines[0]
+
+
+def test_a_stopped_file_says_how_far_it_got_and_how_fast(tmp_path, caplog):
+    caplog.set_level(logging.INFO)
+    dl = DownloadLibrary(str(tmp_path), jobs=4)
+    dl.cache_file = str(tmp_path / ".cache.json")
+    dl.cache_data = {}
+    body = b"y" * (4096 * 10)
+    response = StopsPartWay(body, {"Content-Length": str(len(body))}, dl, after=4)
+    assert not dl._process_download(
+        response, "key", {}, str(tmp_path / "comic.cbz"), remote_file="https://x/comic.cbz",
+    )
+    lines = _finished_lines(caplog)
+    assert len(lines) == 1
+    assert re.match(
+        r"Stopped comic\.cbz at (40|50)% \([\d.]+ KiB of 40\.00 KiB\) after \d+\.\ds, "
+        r"avg [\d.]+ \S?i?B/s$",
+        lines[0],
+    ), lines[0]
+    # Nothing is said to have been downloaded, and it is not in the cache
+    assert dl.cache_data == {}
+
+
+def test_a_stopped_file_of_unknown_size_still_reports(tmp_path, caplog):
+    caplog.set_level(logging.INFO)
+    dl = DownloadLibrary(str(tmp_path), jobs=2)
+    dl.cache_file = str(tmp_path / ".cache.json")
+    dl.cache_data = {}
+    response = StopsPartWay(b"z" * (4096 * 6), {}, dl, after=2)
+    dl._process_download(
+        response, "key", {}, str(tmp_path / "game.zip"), remote_file="https://x/game.zip",
+    )
+    lines = _finished_lines(caplog)
+    assert len(lines) == 1
+    assert re.match(r"Stopped game\.zip after [\d.]+ KiB in \d+\.\ds", lines[0]), lines[0]
+    assert " at " not in lines[0]
+
+
+def test_speed_is_left_off_rather_than_divided_by_zero(caplog):
+    caplog.set_level(logging.INFO)
+    dl = DownloadLibrary("x")
+    dl._log_finished("/a/b.pdf", 1000, 0.0)
+    assert _finished_lines(caplog) == ["Downloaded b.pdf: 1000 B in 0.0s"]

@@ -2308,11 +2308,16 @@ class DownloadLibrary:
                 print()
 
             if isinstance(e, Interrupted):
-                # Asked to stop, so this is not a failure worth shouting
-                logger.debug(
-                    "Stopped downloading {local_filename}".format(
-                        local_filename=local_filename
-                    )
+                # Asked to stop, so this is not a failure worth shouting,
+                # but how far it got and how fast is worth a line
+                self._log_finished(
+                    local_filename,
+                    _file_size(part_file),
+                    time.time() - started,
+                    total=_coerce_size(
+                        (getattr(open_r, "headers", None) or {}).get("Content-Length")
+                    ),
+                    stopped=True,
                 )
             else:
                 logger.error(
@@ -2350,7 +2355,7 @@ class DownloadLibrary:
             self._progress.file_finished(label, ok=True)
 
             self._update_cache_data(cache_file_key, file_info)
-            self._log_completed(local_filename, written, time.time() - started)
+            self._log_finished(local_filename, written, time.time() - started)
             result = True
 
         finally:
@@ -2362,21 +2367,37 @@ class DownloadLibrary:
 
         return result
 
-    def _log_completed(self, local_filename, written, elapsed):
-        """In parallel mode the start lines interleave, so say what
-        finished, and how big it turned out to be
+    def _log_finished(self, local_filename, done, elapsed, total=None,
+                      stopped=False):
+        """One line per file once it is over: how much, how long, and how
+        fast on average, whether it finished or was stopped part way.
+        The progress block, when there is one, keeps it above itself
         """
-        if self.jobs == 1:
-            return
-        # Land this line on a clean row; the reporter repaints after
-        self._progress.clear()
-        logger.info(
-            "Downloaded {name} ({size} in {elapsed:.1f}s)".format(
-                name=os.path.basename(local_filename),
-                size=_human_size(written or 0),
-                elapsed=elapsed,
+        name = os.path.basename(local_filename)
+        done = done or 0
+        rate = done / elapsed if elapsed > 0 else None
+        speed = ", avg {0}/s".format(_human_size(rate)) if rate else ""
+        if not stopped:
+            line = "Downloaded {name}: {size} in {elapsed:.1f}s{speed}".format(
+                name=name, size=_human_size(done), elapsed=elapsed, speed=speed
             )
-        )
+        elif total:
+            line = (
+                "Stopped {name} at {pct}% ({done} of {total}) after "
+                "{elapsed:.1f}s{speed}".format(
+                    name=name,
+                    pct=int(100 * min(1.0, done / total)),
+                    done=_human_size(done),
+                    total=_human_size(total),
+                    elapsed=elapsed,
+                    speed=speed,
+                )
+            )
+        else:
+            line = "Stopped {name} after {done} in {elapsed:.1f}s{speed}".format(
+                name=name, done=_human_size(done), elapsed=elapsed, speed=speed
+            )
+        logger.info(line)
 
     def _hash_algorithm(self, hashes):
         """Strongest checksum the api gave us that we can actually use"""

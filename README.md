@@ -168,11 +168,12 @@ The sl train is Copyright 1993,1998,2014 Toyoda Masashi (mtoyoda@acm.org), used 
 "Everyone is permitted to do anything on this program including copying, modifying, and improving,
 unless you try to pretend that you wrote it."
 
-Each file also announces itself as it lands, on its own line above the block:
+Each file also gets a line of its own above the block once it is over, with its size, time and average
+speed, or how far it got if it was stopped:
 
 ```
-Downloaded Some Comic Vol1.cbz (24.10 MiB in 3.4s)
-Downloaded Another Book.epub (8.40 MiB in 1.1s)
+Downloaded dementia21_vol2.pdf: 310.56 MiB in 76.4s, avg 4.06 MiB/s
+Stopped eastofwest_vol1.cbz at 60% (32.40 MiB of 53.26 MiB) after 9.8s, avg 3.31 MiB/s
 ```
 
 Running sequentially (`--no-parallel`) keeps the original per-file bar. The block is only drawn to

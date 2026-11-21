@@ -3,6 +3,10 @@
 
 ## Unreleased
 
+- Every file now gets one line when it is over, with its size, time and average speed: `Downloaded <file>: <size> in <time>, avg <speed>`, or for one stopped by Ctrl+C, how far it got,
+  `Stopped <file> at <n>% (<done> of <size>) after <time>, avg <speed>`. This is shown with or
+  without `--progress` and with `-j 1` too, where previously nothing was said when a file finished
+  one at a time and a stopped file was only mentioned at debug level
 - Added a `cycle` progress style: a light cycle racing across the grid, leaving a wall of light behind it
 - A second Ctrl+C now always quits, even with downloads in flight. It used to be handled in
   Python, which meant waiting for the main thread and taking the terminal lock first; with the
