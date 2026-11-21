@@ -21,6 +21,8 @@ from urllib3.util.retry import Retry
 
 from .progress_styles import PROGRESS_STYLES, DEFAULT_PROGRESS_STYLE
 from . import sl_train
+from . import auto_jobs
+from .auto_jobs import JobGate, JobTuner
 from .humble_site import HumbleSite, NotSignedIn, SignedUrl, SiteError, UrlSigner
 
 logger = logging.getLogger(__name__)
@@ -266,6 +268,7 @@ class NullReporter:
     """
 
     slots = 0
+    jobs_note = None
 
     def enabled(self):
         return False
@@ -375,6 +378,8 @@ class ProgressReporter:
         # Reentrant, because a log line clears and repaints the block
         self._term = threading.RLock()
         self._hooked = []                     # log handlers routed via us
+        # Shown on the totals line, for -j auto to say where it is
+        self.jobs_note = None
 
     # -- lifecycle ---------------------------------------------------
 
@@ -616,6 +621,8 @@ class ProgressReporter:
             label += " ({failed} failed)".format(failed=self._failed)
         if not self._walk_done:
             label += " so far"
+        if self.jobs_note:
+            label += " · " + self.jobs_note
 
         if self._walk_done and expected:
             fraction = min(1.0, self._done / expected)
@@ -925,7 +932,17 @@ class DownloadLibrary:
         log_skipped=True,
     ):
         self.library_path = library_path
-        self.jobs = max(1, int(jobs))
+        # "auto" runs as many workers as it might ever want, and a gate
+        # lets the number it has settled on download at once
+        self.auto_jobs = isinstance(jobs, str) and jobs.lower() == "auto"
+        self.jobs = auto_jobs.MAXIMUM if self.auto_jobs else max(1, int(jobs))
+        self._gate = JobGate(auto_jobs.START if self.auto_jobs else self.jobs)
+        self._tuner = JobTuner() if self.auto_jobs else None
+        self._tuner_thread = None
+        self._tuner_stop = threading.Event()
+        # Every byte any worker writes, for the tuner to measure with
+        self._bytes_moved = 0
+        self._bytes_lock = threading.Lock()
         self.retries = max(0, int(retries))
         # Checked against what the api says, when it says anything
         self.verify = verify
@@ -947,7 +964,7 @@ class DownloadLibrary:
         self.progress_style = progress_style
         self._progress = (
             ProgressReporter(
-                slots=self.jobs,
+                slots=self._gate.limit,
                 style=progress_style,
                 big_trains=train_per_download,
             )
@@ -1182,6 +1199,16 @@ class DownloadLibrary:
         if self.dry_run is True:
             self._log_dry_run_summary()
 
+        if self._tuner is not None and self._tuner.best:
+            rate, limit = self._tuner.best
+            logger.info(
+                "Finished at {now} downloads at once. The fastest seen was "
+                "{rate}/s, with {limit}: -j {limit} is a good fixed "
+                "setting for this connection".format(
+                    now=self._gate.limit, rate=_human_size(rate), limit=limit
+                )
+            )
+
         if self.adopted_count:
             logger.info(
                 "{count} file(s) were already on disk at the right size and "
@@ -1344,9 +1371,18 @@ class DownloadLibrary:
             # Nothing to parallelise: a dry run makes no downloads
             return
 
-        logger.info(
-            "Downloading with {jobs} parallel jobs".format(jobs=self.jobs)
-        )
+        if self.auto_jobs:
+            logger.info(
+                "Downloading {start} at a time to begin with, finding the "
+                "best number as it goes (up to {most})".format(
+                    start=self._gate.limit, most=self.jobs
+                )
+            )
+            self._progress.jobs_note = "{0} at once".format(self._gate.limit)
+        else:
+            logger.info(
+                "Downloading with {jobs} parallel jobs".format(jobs=self.jobs)
+            )
         self._progress.start()
 
         # Bounded, so traversal cannot run far ahead of the downloads
@@ -1356,7 +1392,65 @@ class DownloadLibrary:
             worker.start()
             self._workers.append(worker)
 
+        if self.auto_jobs:
+            self._tuner_stop.clear()
+            self._tuner_thread = threading.Thread(target=self._tune, daemon=True)
+            self._tuner_thread.start()
+
+    def _count_bytes(self, count):
+        with self._bytes_lock:
+            self._bytes_moved += count
+
+    def _tune(self, interval=None, tick=1.0):
+        """Measure total speed every so often and let the tuner move the
+        number of downloads at once. A measurement only counts when every
+        slot had something to download most of the time: a slow library
+        read is no reason to think more at once would not help
+        """
+        interval = auto_jobs.INTERVAL if interval is None else interval
+        started = time.time()
+        with self._bytes_lock:
+            moved = self._bytes_moved
+        throttled = self._throttled_count
+        samples = busy = 0
+
+        while not self._tuner_stop.wait(tick):
+            samples += 1
+            if self._gate.active >= self._gate.limit:
+                busy += 1
+            now = time.time()
+            if now - started < interval:
+                continue
+
+            with self._bytes_lock:
+                total = self._bytes_moved
+            rate = (total - moved) / (now - started)
+            old = self._gate.limit
+            new, reason = self._tuner.observe(
+                rate,
+                busy=busy >= 0.8 * samples,
+                throttled=self._throttled_count > throttled,
+            )
+            if new != old:
+                self._gate.set_limit(new)
+                logger.info(
+                    "Now downloading {new} at once, was {old}: {reason} "
+                    "({rate}/s in total)".format(
+                        new=new, old=old, reason=reason,
+                        rate=_human_size(rate),
+                    )
+                )
+            self._progress.jobs_note = "{0} at once".format(new)
+
+            started, moved = now, total
+            throttled = self._throttled_count
+            samples = busy = 0
+
     def _stop_workers(self, timeout=None):
+        self._tuner_stop.set()
+        if self._tuner_thread is not None:
+            self._tuner_thread.join(timeout=2)
+            self._tuner_thread = None
         if self._queue is None:
             return
 
@@ -1408,7 +1502,12 @@ class DownloadLibrary:
                     return
                 if self._stop.is_set():
                     continue
-                self._run_download_job(job)
+                if not self._gate.acquire(self._stop):
+                    continue
+                try:
+                    self._run_download_job(job)
+                finally:
+                    self._gate.release()
             except Exception:
                 logger.exception(
                     "Failed to download {remote_file}".format(
@@ -2609,6 +2708,7 @@ class DownloadLibrary:
                     raise Interrupted()
                 written += len(data)
                 outfile.write(data)
+                self._count_bytes(len(data))
                 if hasher is not None:
                     hasher.update(data)
                 if self._show_bar:

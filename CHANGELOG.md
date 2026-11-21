@@ -3,6 +3,11 @@
 
 ## Unreleased
 
+- Added `-j auto`: start at 4 downloads at once and find the fastest number while the run goes,
+  up to 16. It adds two at a time while that makes the total at least 10% faster, takes a step back
+  as soon as one does not, and halves when throttled; it only learns while every slot is busy.
+  Changes are logged with their reason, the totals line shows the current number, and the run ends
+  by naming the fastest it saw
 - Every file now gets one line when it is over, with its size, time and average speed: `Downloaded <file>: <size> in <time>, avg <speed>`, or for one stopped by Ctrl+C, how far it got,
   `Stopped <file> at <n>% (<done> of <size>) after <time>, avg <speed>`. This is shown with or
   without `--progress` and with `-j 1` too, where previously nothing was said when a file finished

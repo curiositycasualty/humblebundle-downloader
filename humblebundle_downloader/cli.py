@@ -101,9 +101,13 @@ def parse_args(args):
     parser.add_argument(
         "-j",
         "--jobs",
-        type=int,
+        type=jobs_value,
         default=4,
-        help="Number of files to download at once (default: 4)",
+        metavar="N|auto",
+        help=(
+            "Number of files to download at once, or 'auto' to start at 4 "
+            "and find the fastest number as it goes, up to 16 (default: 4)"
+        ),
     )
     parser.add_argument(
         "--retries",
@@ -206,6 +210,21 @@ def parse_args(args):
     return parser.parse_args(args)
 
 
+def jobs_value(text):
+    """A whole number of at least 1, or auto"""
+    if text.strip().lower() == "auto":
+        return "auto"
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "expected a number or 'auto', not {0!r}".format(text)
+        )
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return value
+
+
 def resolve_jobs(cli_args):
     """--no-parallel wins over --jobs, so an alias carrying -j can still
     be overridden on the command line without an argparse conflict
@@ -215,9 +234,6 @@ def resolve_jobs(cli_args):
 
 def cli():
     cli_args = parse_args(sys.argv[1:])
-
-    if cli_args.jobs < 1:
-        sys.exit("--jobs must be at least 1")
 
     if cli_args.retries < 0:
         sys.exit("--retries cannot be negative")

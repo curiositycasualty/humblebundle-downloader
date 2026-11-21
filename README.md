@@ -15,7 +15,7 @@ After that it will only download the content that has been updated or is missing
 - downloads new and updated content from your Humble Bundle Library on each run _(only check for updates if using `--update`)_
 - cli command for easy use (downloading will also work on a headless system)
 - works for SSO and 2FA accounts
-- downloads several files at once, 4 by default _(`--jobs`/`--no-parallel` flags)_
+- downloads several files at once, 4 by default, or `-j auto` to find the fastest number _(`--jobs`/`--no-parallel` flags)_
 - optional progress bar for each item downloaded _(`--progress` flag)_
 - optional dry run that reports how much there is to download before downloading any of it _(`--dry-run` flag)_
 - optional listing of the url of every file being collected _(`--print-urls` flag)_
@@ -130,6 +130,14 @@ working after roughly a day, so a saved list is only good for a short time.
 Four files download at once by default. Change the number with `--jobs`/`-j`:
 
 `hbd --cookie-file cookies.txt --library-path "Comics" -j 8`
+
+`-j auto` finds the number for you. It starts at 4 and every 15 seconds measures how fast
+everything is downloading in total. While two more at once makes that at least a tenth faster, it
+adds two more, up to 16; as soon as a step does not pay, it takes it back and leaves it alone for a
+minute before trying again. If Humble starts throttling, it halves at once. It only learns from
+moments when every download slot was busy, so a slow stretch reading the library does not count
+against it. Each change is logged with its reason, the totals line shows the current number, and
+the run ends by saying which number was fastest, which makes a good fixed `-j` for next time.
 
 `--no-parallel` goes back to one file at a time, and overrides `--jobs`, so it still works when
 `-j` is baked into a shell alias.
