@@ -20,6 +20,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from .progress_styles import PROGRESS_STYLES, DEFAULT_PROGRESS_STYLE
+from . import sl_train
 from .humble_site import HumbleSite, NotSignedIn, SignedUrl, SiteError, UrlSigner
 
 logger = logging.getLogger(__name__)
@@ -217,9 +218,13 @@ def _muncher_bar(fraction, width, style, frame):
     """
     frames = style["muncher"]
     muncher = frames[frame % len(frames)]
+    end = style.get("end", "")
+    if len(end) + len(muncher) > width:
+        end = ""
+    width -= len(end)
     span = max(0, width - len(muncher))
     if span == 0:
-        return "[" + muncher[:width] + "]"
+        return "[" + muncher[:width] + end + "]"
 
     if fraction is None:
         # Bounce: 0..span..0
@@ -228,13 +233,14 @@ def _muncher_bar(fraction, width, style, frame):
         position = step if step <= span else cycle - step
         ahead = style["pellet"] * (span - position)
         behind = style["pellet"] * position
-        return "[" + behind + muncher + ahead + "]"
+        return "[" + behind + muncher + ahead + end + "]"
 
     position = int(round(max(0.0, min(1.0, fraction)) * span))
-    return "[{wake}{muncher}{pellets}]".format(
+    return "[{wake}{muncher}{pellets}{end}]".format(
         wake=style["wake"] * position,
         muncher=muncher,
         pellets=style["pellet"] * (span - position),
+        end=end,
     )
 
 
@@ -335,8 +341,11 @@ class ProgressReporter:
     STOP_WAIT = 2.0
 
     def __init__(self, stream=None, slots=1, interval=0.2, window=3.0,
-                 style=DEFAULT_PROGRESS_STYLE):
+                 style=DEFAULT_PROGRESS_STYLE, big_trains=False):
         self.stream = sys.stderr if stream is None else stream
+        # With a style that has a scene: give every download one, not
+        # only the totals, when the terminal is tall enough
+        self.big_trains = big_trains
         self.slots = max(1, int(slots))
         self.interval = interval
         self.window = window
@@ -636,19 +645,65 @@ class ProgressReporter:
 
             if not self._fits(width):
                 return [self._compact(seen, width)]
-            # Leave the shell a row to write on
-            if height < len(names) + 3:
+
+            each, total = self._scenes(len(names), width, height)
+            if each is None:
                 return [self._compact(seen, width)]
 
+            # One column short of the edge, like every other row, so the
+            # terminal never wraps one and throws the repaint out
+            scene_width = width - 1
             lines = []
             for name in names:
                 entry = files.get(name)
                 if entry is None:
                     lines.append(self._idle_line(width))
+                    if each:
+                        lines.extend(sl_train.scene(
+                            None, scene_width, self._frame, empty=True))
                 else:
                     lines.append(self._slot_line(name, entry, width))
+                    if each:
+                        lines.extend(sl_train.scene(
+                            self._fraction(entry), scene_width, self._frame))
             lines.append(self._total_line(seen, width))
+            if total:
+                lines.extend(sl_train.scene(
+                    self._total_fraction(), scene_width, self._frame))
             return lines
+
+    def _scenes(self, slots, width, height):
+        """(a scene per download, a scene for the totals), whichever of
+        those fit, best first; (None, None) when not even plain rows do.
+        A row is always left for the shell
+        """
+        tall = sl_train.HEIGHT + 1
+        scene = (
+            self.style.get("scene") == "sl"
+            and sl_train.cars_for(width - 1) >= 0
+        )
+        options = []
+        if scene and self.big_trains:
+            options.append((True, True))
+        if scene:
+            options.append((False, True))
+        options.append((False, False))
+        for each, total in options:
+            lines = slots * (1 + (tall if each else 0)) + 1 + (tall if total else 0)
+            if height >= lines + 2:
+                return each, total
+        return None, None
+
+    @staticmethod
+    def _fraction(entry):
+        total = entry["total"]
+        return (entry["done"] / total) if total else None
+
+    def _total_fraction(self):
+        expected = max(0, self._queued - self._skipped)
+        if self._walk_done and expected:
+            return min(1.0, self._done / expected)
+        return None
 
     def _compact(self, seen, width):
         """One line, for a terminal too small for the block"""
@@ -865,6 +920,7 @@ class DownloadLibrary:
         retries=5,
         verify=True,
         progress_style=DEFAULT_PROGRESS_STYLE,
+        train_per_download=False,
         shutdown_grace=None,
         log_skipped=True,
     ):
@@ -890,7 +946,11 @@ class DownloadLibrary:
         self._show_status = progress_bar and self.jobs > 1
         self.progress_style = progress_style
         self._progress = (
-            ProgressReporter(slots=self.jobs, style=progress_style)
+            ProgressReporter(
+                slots=self.jobs,
+                style=progress_style,
+                big_trains=train_per_download,
+            )
             if self._show_status
             else NullReporter()
         )

@@ -9,7 +9,11 @@
   After the first press, the second is left to the operating system, which ends the process at
   once. The progress display also gives up after two seconds when a run is leaving, rather than
   waiting on a stuck terminal
-- Added a `train` progress style: a little train running down the rails, leaving steam behind
+- Added a `train` progress style. Each download's train runs along its rails into a tunnel at the
+  end of its bar, and the totals get the little train from sl (Toyoda Masashi's, under sl's
+  licence) crossing the screen into a tunnel as the run completes. `--train-per-download` gives
+  every download its own sl train when the terminal is tall enough, stepping down to fewer trains,
+  then none, as it gets shorter
 - The first Ctrl+C now waits up to five minutes for a stuck transfer by default, up from ten
   seconds. Moving transfers still stop at their next chunk; `--exit-timeout` still overrides it and
   a second Ctrl+C still quits at once

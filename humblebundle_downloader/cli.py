@@ -83,9 +83,19 @@ def parse_args(args):
         choices=sorted(PROGRESS_STYLES),
         help=(
             "Look of the per-file progress bar when downloading in "
-            "parallel (default: {default})".format(
+            "parallel (default: {default}). 'train' also runs the little "
+            "train from sl across the screen for the totals".format(
                 default=DEFAULT_PROGRESS_STYLE
             )
+        ),
+    )
+    parser.add_argument(
+        "--train-per-download",
+        action="store_true",
+        help=(
+            "With --progress-style train, give every download its own sl "
+            "train, not just the totals. Each takes 8 rows, so it falls "
+            "back to one line per download when the terminal is too short"
         ),
     )
     parser.add_argument(
@@ -236,6 +246,7 @@ def cli():
             dry_run=cli_args.dry_run,
             print_urls=cli_args.print_urls,
             progress_style=cli_args.progress_style,
+            train_per_download=cli_args.train_per_download,
             jobs=jobs,
             retries=cli_args.retries,
             verify=not cli_args.no_verify,

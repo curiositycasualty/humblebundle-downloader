@@ -1665,15 +1665,20 @@ def test_the_default_exit_wait_is_five_minutes():
     assert DownloadLibrary("x").shutdown_grace == 300.0
 
 
-def test_the_train_runs_down_the_rails_leaving_steam():
+def test_the_train_runs_along_the_rails_into_a_tunnel():
     style = PROGRESS_STYLES["train"]
     start = _muncher_bar(0.0, 20, style, 0)
     middle = _muncher_bar(0.5, 20, style, 1)
     end = _muncher_bar(1.0, 20, style, 0)
-    assert start == "[[]=[]=[]>" + "_" * 11 + "]"
-    assert middle.startswith("[" + "°" * 6 + "[]-[]-[]>")
-    assert end == "[" + "°" * 11 + "[]=[]=[]>]"
+    assert start == "[[]=[]=[]>" + "═" * 9 + "▐▓]"
+    assert middle.startswith("[" + "═" * 4 + "[]-[]-[]>")
+    assert end == "[" + "═" * 9 + "[]=[]=[]>▐▓]"
     assert len({len(start), len(middle), len(end)}) == 1
+
+
+def test_a_track_end_is_dropped_when_the_bar_is_too_short_for_it():
+    style = PROGRESS_STYLES["train"]
+    assert _muncher_bar(0.5, 9, style, 0) == "[[]=[]=[]>]"
 
 
 def test_the_cli_offers_the_train(capsys):
@@ -1681,3 +1686,7 @@ def test_the_cli_offers_the_train(capsys):
 
     args = parse_args(["-l", "x", "-s", "y", "--progress-style", "train"])
     assert args.progress_style == "train"
+    assert args.train_per_download is False
+    args = parse_args(["-l", "x", "-s", "y", "--progress-style", "train",
+                       "--train-per-download"])
+    assert args.train_per_download is True

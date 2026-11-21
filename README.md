@@ -157,6 +157,17 @@ in `progress_styles.py`, which is a plain dict with no imports, so adding your o
 change — the only rule is that every frame of a style has to be the same width, or the bar jitters
 as it animates.
 
+`train` runs each download's little train along its rails into a tunnel at the end of the bar, and
+under the totals runs the little train from [sl](https://github.com/mtoyoda/sl) (the one `sl -l`
+draws) along its own track and into a tunnel as the run completes. `--train-per-download` gives
+every download its own sl train too. That takes eight rows a download, so the display steps down
+as the terminal gets shorter: a train for each download, then for the totals only, then plain rows,
+then a single summary line. The train is turned round to run left to right like the bars.
+
+The sl train is Copyright 1993,1998,2014 Toyoda Masashi (mtoyoda@acm.org), used under sl's licence:
+"Everyone is permitted to do anything on this program including copying, modifying, and improving,
+unless you try to pretend that you wrote it."
+
 Each file also announces itself as it lands, on its own line above the block:
 
 ```
