@@ -62,6 +62,11 @@ class Interrupted(Exception):
     """
 
 
+class RepeatedMismatch(Exception):
+    """A file failed its checksum twice with the same wrong bytes, so it
+    is given up on rather than downloaded yet again"""
+
+
 class ChecksumMismatch(Exception):
     """What arrived is not what the api said it would be.
 
@@ -78,17 +83,29 @@ class LibraryPathError(Exception):
     """
 
 
+# Checksums of nothing at all. Humble lists these for some files, having
+# hashed an empty file at some point; no download could ever match one
+EMPTY_DIGESTS = frozenset((
+    "d41d8cd98f00b204e9800998ecf8427e",                     # md5
+    "da39a3ee5e6b4b0d3255bfef95601890afd80709",             # sha1
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+))
+
+
 def _struct_hashes(entry):
     """Checksums the api offers for a file, strongest first.
 
     Everything is optional: entries without one are downloaded and kept
-    exactly as before.
+    exactly as before. A listed checksum of an empty file is treated as
+    none, since it says nothing about the file actually offered
     """
     found = {}
     for name in ("sha1", "md5"):
         value = entry.get(name)
         if isinstance(value, str) and value.strip():
-            found[name] = value.strip().lower()
+            value = value.strip().lower()
+            if value not in EMPTY_DIGESTS:
+                found[name] = value
     return found
 
 
@@ -2873,6 +2890,8 @@ class DownloadLibrary:
         if already:
             self._progress.file_progress(label, already)
 
+        # What the last download that failed its checksum hashed to
+        mismatched = None
         while True:
             try:
                 self._stream_to_file(
@@ -2880,11 +2899,20 @@ class DownloadLibrary:
                 )
                 try:
                     self._check_digest(algorithm, hasher, hashes, label)
-                except ChecksumMismatch:
+                except ChecksumMismatch as error:
                     if not self._listing_is_stale(label, part_file, listed_size):
+                        if error.actual == mismatched:
+                            # The same wrong bytes twice: the server is
+                            # sending this file consistently, so another
+                            # try would only fetch them a third time
+                            raise RepeatedMismatch(
+                                "{0}, and the same again when downloaded a "
+                                "second time".format(error)
+                            )
+                        mismatched = error.actual
                         raise
                 return _file_size(part_file), _digest_of(algorithm, hasher)
-            except (KeyboardInterrupt, Interrupted):
+            except (KeyboardInterrupt, Interrupted, RepeatedMismatch):
                 # Shutting down: nothing to resume, nothing to report
                 raise
             except Exception as error:
@@ -3075,13 +3103,15 @@ class DownloadLibrary:
         expected = (hashes or {}).get(algorithm, "").lower()
         actual = hasher.hexdigest().lower()
         if expected and actual != expected:
-            raise ChecksumMismatch(
+            error = ChecksumMismatch(
                 "{algorithm} of {label} is {actual}, expected "
                 "{expected}".format(
                     algorithm=algorithm, label=label,
                     actual=actual, expected=expected,
                 )
             )
+            error.actual = actual
+            raise error
 
     def _reopen_for_resume(self, remote_file, part_file, already,
                            validator=None):

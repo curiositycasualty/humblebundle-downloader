@@ -3,6 +3,11 @@
 
 ## 0.5.0
 
+- A listed checksum of an empty file, which Humble gives for some files, is treated as no checksum
+  rather than one no download could match. Those files were downloaded again and again until the
+  retries ran out, and then reported as failed
+- A file that fails its checksum with the same wrong bytes twice is given up on there and then,
+  rather than downloaded again for every remaining retry
 - `largest` can be given to `--prefer-format`: `-f largest` takes the biggest file of each item
   whatever its format, and `-f cbz largest` the `.cbz` if there is one, otherwise the biggest.
   Sizes are judged by what the server sends, as for the fallback

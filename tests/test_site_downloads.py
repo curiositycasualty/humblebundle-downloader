@@ -1013,3 +1013,42 @@ def test_largest_downloads_only_the_one(tmp_path):
     fake = two_formats(3000, 1000, b"p" * 1100, b"c" * 1000)
     library(tmp_path, fake, jobs=1, prefer_format=["largest"]).start()
     assert files_under(tmp_path / "lib") == ["Comics/Wytches/wytches.pdf"]
+
+
+###
+# Checksums the listing gets wrong
+###
+def test_a_listed_checksum_of_an_empty_file_is_ignored(tmp_path, caplog):
+    import logging
+
+    caplog.set_level(logging.INFO)
+    # As Humble lists some files: the right size, the checksums of nothing
+    struct = real_struct("two.pdf")
+    struct["sha1"] = "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+    struct["md5"] = "d41d8cd98f00b204e9800998ecf8427e"
+    entries = [entry("e2", "b1", "Book Two", "Bundle One")]
+    pages = {"/home/library/b1": bundle_page("b1", "Bundle One", entitlement(
+        "e2", "Book Two", download("k-two", "ebook", struct)))}
+    fake = FakeHumble(entries, pages)
+    dl = library(tmp_path, fake, jobs=1, retries=3)
+    dl.start()
+    assert files_under(tmp_path / "lib") == ["Bundle One/Book Two/two.pdf"]
+    assert [get[0] for get in fake.cdn_gets] == ["two.pdf"]
+    assert "not what was promised" not in caplog.text
+    assert dl.failed_files == []
+
+
+def test_the_same_wrong_bytes_twice_stop_the_retries(tmp_path, caplog):
+    import logging
+
+    caplog.set_level(logging.INFO)
+    entries, pages = two_bundles()
+    wrong = b"x" * len(BODIES["two.pdf"])
+    fake = FakeHumble(entries, pages, bodies=dict(BODIES, **{"two.pdf": wrong}))
+    dl = library(tmp_path, fake, jobs=1, retries=5)
+    dl.start()
+    assert not (tmp_path / "lib" / "Bundle One" / "Book Two" / "two.pdf").exists()
+    assert [get[0] for get in fake.cdn_gets].count("two.pdf") == 2
+    assert "the same again when downloaded a second time" in caplog.text
+    assert len(dl.failed_files) == 1
+    assert "b1:two.pdf" not in cache_of(tmp_path)
