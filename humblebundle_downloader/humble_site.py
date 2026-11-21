@@ -242,13 +242,40 @@ class HumbleSite:
         return response
 
     def _check_signed_in(self, response):
-        """The library redirects to auth.humblebundle.com when signed out"""
+        """Some answers redirect to auth.humblebundle.com when signed out.
+        Most do not: see library() for the one that always tells"""
         final = getattr(response, "url", "") or ""
         if "://auth." in final or "/login" in final:
-            raise NotSignedIn(
-                "Humble asked for a sign in: the cookie is missing or has "
-                "expired. Sign in again in your browser and pass the new one"
-            )
+            raise NotSignedIn(self._not_signed_in_message())
+
+    def _cookie_names(self):
+        """Names, never values, of the cookies sent to the site"""
+        names = []
+        try:
+            for cookie in self.session.cookies:
+                if "humblebundle.com" in (cookie.domain or ""):
+                    names.append(cookie.name)
+        except Exception:
+            pass
+        header = (getattr(self.session, "headers", None) or {}).get("cookie") or ""
+        for part in header.split(";"):
+            name = part.split("=", 1)[0].strip()
+            if name and "=" in part:
+                names.append(name)
+        return sorted(set(names))
+
+    def _not_signed_in_message(self):
+        names = self._cookie_names()
+        sent = (
+            "the cookies sent were: " + ", ".join(names)
+            if names
+            else "no cookies for humblebundle.com were sent at all"
+        )
+        return (
+            "Humble says this is not signed in ({sent}). The cookie is "
+            "missing, is not the session one, or has expired. Sign in again "
+            "in your browser and pass a fresh one".format(sent=sent)
+        )
 
     def _call(self, name, path, session=None, data=None, files=None):
         """Run one of the site's server actions and return its value"""
@@ -360,6 +387,20 @@ class HumbleSite:
             files = [("_1_" + name, (None, value)) for name, value in fields.items()]
             files.append(("0", (None, json.dumps([{}, "$K1"]))))
             value = self._call(LIST_ACTION, LIBRARY_PATH, files=files)
+
+            if isinstance(value, dict) and (
+                value.get("success") is False or value.get("error")
+            ):
+                # Signed out gets a 200 and an empty library, with the
+                # reason alongside. Taking that at face value would look
+                # like a successful run that found nothing to do
+                if value.get("error") == "not_authenticated":
+                    raise NotSignedIn(self._not_signed_in_message())
+                raise SiteError(
+                    "Humble would not list the library ({error})".format(
+                        error=value.get("error") or "no reason given"
+                    )
+                )
 
             results = value.get("results") if isinstance(value, dict) else None
             if not isinstance(results, list):
@@ -493,9 +534,9 @@ class HumbleSite:
         if not isinstance(value, dict) or not value.get("ok"):
             code = value.get("code") if isinstance(value, dict) else None
             if code == "not_authenticated":
-                raise NotSignedIn(
-                    "Humble refused to sign a download url: not signed in"
-                )
+                raise NotSignedIn(self._not_signed_in_message())
+            if code is None and value.get("error") == "not_authenticated":
+                raise NotSignedIn(self._not_signed_in_message())
             raise SiteError(
                 "Humble would not sign a download url ({code})".format(
                     code=code or "no reason given"

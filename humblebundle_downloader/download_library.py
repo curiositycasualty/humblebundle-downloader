@@ -841,7 +841,12 @@ class DownloadLibrary:
         if cookie_path:
             try:
                 cookie_jar = http.cookiejar.MozillaCookieJar(cookie_path)
-                cookie_jar.load()
+                # Session cookies, which is what a sign in usually is,
+                # are exported with no expiry or an expiry of 0. By
+                # default the first are discarded and the second count
+                # as expired, so the cookie that matters never loads.
+                # A cookie that really is stale is just refused upstream
+                cookie_jar.load(ignore_discard=True, ignore_expires=True)
                 self.session.cookies = cookie_jar
             except http.cookiejar.LoadError:
                 # Still support the original cookie method

@@ -532,3 +532,52 @@ def test_signed_url_resolves_late_and_prints_without_a_token():
     assert "t=" not in str(url) and "a.pdf" in str(url)
     assert url.resolve().startswith("https://cdn/a.pdf")
     assert site.calls == 1
+
+
+###
+# signed out
+###
+class SignedOutListing(FakeSite):
+    """What Humble really does: 200, an empty library, and the reason"""
+
+    def post(self, url, headers=None, data=None, files=None):
+        return Response(action_response({
+            "results": [], "bundlesCount": 0, "requestId": "1",
+            "pagination": {"page": 1, "totalDocs": 0, "totalPages": 1},
+            "success": False, "error": "not_authenticated", "retryable": False,
+        }))
+
+
+def test_an_empty_signed_out_listing_is_not_an_empty_library():
+    with pytest.raises(NotSignedIn):
+        HumbleSite(SignedOutListing()).library()
+
+
+def test_signed_out_names_the_cookies_sent_but_not_their_values():
+    fake = SignedOutListing()
+    fake.headers = {"cookie": "_simpleauth_sess=SECRET1; csrf=SECRET2"}
+    with pytest.raises(NotSignedIn) as raised:
+        HumbleSite(fake).library()
+    message = str(raised.value)
+    assert "_simpleauth_sess" in message and "csrf" in message
+    assert "SECRET" not in message
+
+
+def test_signed_out_with_no_cookies_says_so():
+    with pytest.raises(NotSignedIn, match="no cookies"):
+        HumbleSite(SignedOutListing()).library()
+
+
+def test_any_other_listing_error_is_reported():
+    class Broken(FakeSite):
+        def post(self, url, headers=None, data=None, files=None):
+            return Response(action_response({"results": [], "success": False, "error": "upstream_error"}))
+
+    with pytest.raises(SiteError, match="upstream_error"):
+        HumbleSite(Broken()).library()
+
+
+def test_sign_error_field_also_means_signed_out():
+    fake = FakeSite(signer=lambda ids: {"ok": False, "error": "not_authenticated"})
+    with pytest.raises(NotSignedIn):
+        HumbleSite(fake).sign(["e1"])

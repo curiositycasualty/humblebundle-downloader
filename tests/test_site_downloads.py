@@ -355,3 +355,18 @@ def test_a_bare_session_value_still_becomes_simpleauth(tmp_path):
 def test_a_cookie_header_is_passed_through(tmp_path):
     dl = DownloadLibrary(str(tmp_path), cookie_auth="session=xyz; other=1")
     assert dl.session.headers["cookie"] == "session=xyz; other=1"
+
+
+def test_a_cookie_file_keeps_session_cookies(tmp_path):
+    """Exported session cookies have no expiry, or 0, and are HttpOnly"""
+    cookies = tmp_path / "cookies.txt"
+    cookies.write_text(
+        "# Netscape HTTP Cookie File\n"
+        "#HttpOnly_.humblebundle.com\tTRUE\t/\tTRUE\t0\tsession_zero\tA\n"
+        ".humblebundle.com\tTRUE\t/\tTRUE\t\tsession_blank\tB\n"
+        "www.humblebundle.com\tFALSE\t/\tTRUE\t4102444800\tlong_lived\tC\n"
+    )
+    dl = DownloadLibrary(str(tmp_path / "lib"), cookie_path=str(cookies))
+    assert sorted(c.name for c in dl.session.cookies) == [
+        "long_lived", "session_blank", "session_zero",
+    ]
