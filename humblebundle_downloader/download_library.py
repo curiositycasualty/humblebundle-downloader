@@ -1,5 +1,6 @@
 import os
 import re
+import contextlib
 import sys
 import json
 import time
@@ -263,6 +264,15 @@ class NullReporter:
     def paint(self):
         pass
 
+    def printing(self):
+        return contextlib.nullcontext()
+
+    def attach_logging(self):
+        pass
+
+    def detach_logging(self):
+        pass
+
     def render(self, width=80, height=24):
         return []
 
@@ -335,6 +345,10 @@ class ProgressReporter:
         self._thread = None
         self._stop = threading.Event()
         self._painted = 0                     # lines currently on screen
+        # Held for every write to the terminal, block or log line alike.
+        # Reentrant, because a log line clears and repaints the block
+        self._term = threading.RLock()
+        self._hooked = []                     # log handlers routed via us
 
     # -- lifecycle ---------------------------------------------------
 
@@ -349,6 +363,7 @@ class ProgressReporter:
             return
         self._started_at = time.time()
         self._stop.clear()
+        self.attach_logging()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
@@ -358,7 +373,58 @@ class ProgressReporter:
         self._stop.set()
         self._thread.join()
         self._thread = None
+        self.detach_logging()
         self.clear()
+
+    def attach_logging(self):
+        """Route log lines bound for the terminal through the block.
+
+        A log line written while the block is on screen lands inside it
+        and pushes it down a row, so the next repaint starts a row too
+        low and leaves the old top row behind, frozen. That is where
+        duplicated rows and bars stuck at 100% came from. Instead, each
+        line clears the block, is written, and the block is redrawn
+        under it, all under the one terminal lock
+        """
+        for handler in logging.getLogger().handlers:
+            stream = getattr(handler, "stream", None)
+            if handler in [h for h, _ in self._hooked]:
+                continue
+            try:
+                to_terminal = bool(stream.isatty())
+            except Exception:
+                to_terminal = False
+            if not to_terminal:
+                continue
+            original = handler.emit
+
+            def emit(record, original=original):
+                with self._term:
+                    self.clear()
+                    original(record)
+                    self.paint()
+
+            handler.emit = emit
+            self._hooked.append((handler, original))
+
+    def detach_logging(self):
+        for handler, _ in self._hooked:
+            try:
+                del handler.emit
+            except AttributeError:
+                pass
+        self._hooked = []
+
+    @contextlib.contextmanager
+    def printing(self):
+        """For output that is not logging, like --print-urls"""
+        with self._term:
+            self.clear()
+            try:
+                yield
+            finally:
+                if self._thread is not None or self._hooked:
+                    self.paint()
 
     # -- what the workers report -------------------------------------
 
@@ -583,18 +649,23 @@ class ProgressReporter:
 
     def clear(self):
         """Wipe the block so ordinary log output lands on clean rows"""
-        if not self._painted or not self.enabled():
+        with self._term:
+            if not self._painted or not self.enabled():
+                self._painted = 0
+                return
+            out = ["\033[{0}A".format(self._painted)]
+            out.extend(["\r\033[K\n"] * self._painted)
+            out.append("\033[{0}A".format(self._painted))
             self._painted = 0
-            return
-        out = ["\033[{0}A".format(self._painted)]
-        out.extend(["\r\033[K\n"] * self._painted)
-        out.append("\033[{0}A".format(self._painted))
-        self._painted = 0
-        self._write("".join(out))
+            self._write("".join(out))
 
     def paint(self):
         if not self.enabled():
             return
+        with self._term:
+            self._paint()
+
+    def _paint(self):
         try:
             size = shutil.get_terminal_size((80, 24))
             width, height = size.columns, size.lines
@@ -1604,7 +1675,8 @@ class DownloadLibrary:
                     return
             # Straight to stdout, one per line, so the list stays usable
             # when piped into another tool. All logging goes to stderr
-            print(url)
+            with self._progress.printing():
+                print(url)
 
     def _get_remote_headers(self, remote_file):
         """Headers only, so nothing is transferred to size up a file"""
@@ -2226,7 +2298,9 @@ class DownloadLibrary:
 
         Returns (size of the finished file, checksums computed for it).
         """
-        logger.info(
+        # The block already shows what is in flight, and a line per start
+        # on top of a line per finish just scrolls the history away
+        (logger.debug if self._show_status else logger.info)(
             "Downloading: {local_filename}".format(local_filename=local_filename)
         )
 
