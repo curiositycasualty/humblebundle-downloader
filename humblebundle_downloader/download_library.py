@@ -104,6 +104,27 @@ def _feed_hash_from_file(hasher, path):
             hasher.update(block)
 
 
+SITE_HOST = "www.humblebundle.com"
+
+
+def _jar_from_header(jar, header):
+    """Put the cookies from a Cookie header into the session's jar.
+
+    Not into a header: requests drops a hand set Cookie header when it
+    follows a redirect and rebuilds it from the jar alone, and the site
+    now redirects every page fetch once (Next.js adds ?_rsc=). With the
+    header the redirected request went out signed out, and came back as
+    the signed out page with nothing in it.
+
+    Scoped to the site's own host, so none of them go to the download
+    cdn either
+    """
+    for part in header.split(";"):
+        name, sep, value = part.strip().partition("=")
+        if sep and name:
+            jar.set(name.strip(), value.strip(), domain=SITE_HOST, path="/")
+
+
 def _looks_like_cookie_header(value):
     """name=value, as opposed to a bare session value.
 
@@ -851,15 +872,16 @@ class DownloadLibrary:
             except http.cookiejar.LoadError:
                 # Still support the original cookie method
                 with open(cookie_path, "r") as f:
-                    self.session.headers.update({"cookie": f.read().strip()})
+                    _jar_from_header(self.session.cookies, f.read().strip())
         elif cookie_auth:
             if _looks_like_cookie_header(cookie_auth):
                 # A whole cookie header, name=value pairs and all, which
                 # is how a cookie other than _simpleauth_sess gets in
-                cookie_header = cookie_auth.strip()
+                _jar_from_header(self.session.cookies, cookie_auth.strip())
             else:
-                cookie_header = "_simpleauth_sess={}".format(cookie_auth)
-            self.session.headers.update({"cookie": cookie_header})
+                self.session.cookies.set(
+                    "_simpleauth_sess", cookie_auth.strip(), domain=SITE_HOST
+                )
 
     def _can_write(self, path):
         """Actually write something, rather than ask about permissions.

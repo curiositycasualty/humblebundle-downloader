@@ -347,14 +347,84 @@ def test_cookie_header_or_bare_value(value, header):
     assert _looks_like_cookie_header(value) is header
 
 
+def _jar(dl):
+    return {(c.name, c.value, c.domain) for c in dl.session.cookies}
+
+
 def test_a_bare_session_value_still_becomes_simpleauth(tmp_path):
     dl = DownloadLibrary(str(tmp_path), cookie_auth="abc==")
-    assert dl.session.headers["cookie"] == "_simpleauth_sess=abc=="
+    assert _jar(dl) == {("_simpleauth_sess", "abc==", "www.humblebundle.com")}
+    assert "cookie" not in {k.lower() for k in dl.session.headers}
 
 
-def test_a_cookie_header_is_passed_through(tmp_path):
-    dl = DownloadLibrary(str(tmp_path), cookie_auth="session=xyz; other=1")
-    assert dl.session.headers["cookie"] == "session=xyz; other=1"
+def test_a_cookie_header_goes_into_the_jar(tmp_path):
+    dl = DownloadLibrary(str(tmp_path), cookie_auth=" session=xyz; other=1=2 ;")
+    assert _jar(dl) == {
+        ("session", "xyz", "www.humblebundle.com"),
+        ("other", "1=2", "www.humblebundle.com"),
+    }
+    assert "cookie" not in {k.lower() for k in dl.session.headers}
+
+
+def test_an_old_style_raw_cookie_file_goes_into_the_jar(tmp_path):
+    raw = tmp_path / "cookie.txt"
+    raw.write_text("_simpleauth_sess=abc; other=1\n")
+    dl = DownloadLibrary(str(tmp_path / "lib"), cookie_path=str(raw))
+    assert ("_simpleauth_sess", "abc", "www.humblebundle.com") in _jar(dl)
+
+
+class RedirectOnce:
+    """A real requests transport: the first fetch of a page is answered
+    with a 307 to the same page plus ?_rsc=, as Next.js now does, and the
+    second is only served the library if the session cookie came along"""
+
+    def __init__(self):
+        self.seen = []
+
+    def send(self, request, **kwargs):
+        import requests
+
+        self.seen.append((request.url, request.headers.get("Cookie")))
+        response = requests.Response()
+        response.request = request
+        response.url = request.url
+        if "_rsc=" not in request.url:
+            response.status_code = 307
+            response.headers["Location"] = request.url + "?_rsc=abc"
+            response._content = b""
+        else:
+            signed_in = "ory_session_x=y" in (request.headers.get("Cookie") or "")
+            response.status_code = 200
+            response._content = (
+                b'1:{"userLibraryItem":{"entitlements":{"downloads":[{"id":"e1",'
+                b'"title":"Book","type":"download_drm_free","downloads":[{"key":'
+                b'"k","platform":"ebook","downloadStruct":[{"name":"PDF",'
+                b'"fileSize":1,"url":{"web":"b.pdf"}}]}]}]}}}\n'
+                if signed_in else b'1:{"signedOut":true}\n'
+            )
+        return response
+
+    def close(self):
+        pass
+
+
+def test_cookies_survive_the_rsc_redirect(tmp_path):
+    from humblebundle_downloader.humble_site import HumbleSite
+
+    dl = DownloadLibrary(str(tmp_path), cookie_auth="ory_session_x=y; other=1")
+    transport = RedirectOnce()
+    dl.session.mount("https://", transport)
+    files = HumbleSite(dl.session).page_files("/home/library/b1")
+    assert list(files) == ["e1"]
+    assert [bool(cookie) for _, cookie in transport.seen] == [True, True]
+
+
+def test_cookies_are_not_sent_to_the_download_cdn(tmp_path):
+    dl = DownloadLibrary(str(tmp_path), cookie_auth="ory_session_x=y")
+    transport = RedirectOnce()
+    dl.session.mount("https://", transport)
+    dl.session.get("https://cdn.humble.com/humblebundle/b.pdf?_rsc=1&t=tok")
+    assert transport.seen[-1][1] is None
 
 
 def test_a_cookie_file_keeps_session_cookies(tmp_path):

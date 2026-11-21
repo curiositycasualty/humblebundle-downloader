@@ -568,6 +568,23 @@ def test_signed_out_with_no_cookies_says_so():
         HumbleSite(SignedOutListing()).library()
 
 
+def test_signed_out_separates_cookies_for_other_hosts():
+    import requests
+
+    fake = SignedOutListing()
+    fake.cookies = requests.cookies.RequestsCookieJar()
+    fake.cookies.set("ory_session_abc", "v", domain=".humblebundle.com")
+    fake.cookies.set("site_only", "v", domain="www.humblebundle.com")
+    fake.cookies.set("__Host-ory_kratos_browser_x", "v", domain="auth.humblebundle.com")
+    with pytest.raises(NotSignedIn) as raised:
+        HumbleSite(fake).library()
+    message = str(raised.value)
+    sent, _, other = message.partition("held but only for other hosts")
+    assert "ory_session_abc" in sent and "site_only" in sent
+    assert "__Host-ory_kratos_browser_x" in other
+    assert "__Host-ory_kratos_browser_x" not in sent
+
+
 def test_any_other_listing_error_is_reported():
     class Broken(FakeSite):
         def post(self, url, headers=None, data=None, files=None):

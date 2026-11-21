@@ -249,32 +249,45 @@ class HumbleSite:
             raise NotSignedIn(self._not_signed_in_message())
 
     def _cookie_names(self):
-        """Names, never values, of the cookies sent to the site"""
-        names = []
+        """Names, never values: (sent to the site, held for other hosts).
+
+        A cookie file holds cookies for every humblebundle.com host, but
+        only those whose domain covers the site's own host are sent, and
+        the difference matters when working out why a sign in failed
+        """
+        host = self.base_url.split("://", 1)[-1].split("/", 1)[0]
+        sent, elsewhere = set(), set()
         try:
             for cookie in self.session.cookies:
-                if "humblebundle.com" in (cookie.domain or ""):
-                    names.append(cookie.name)
+                domain = (cookie.domain or "").lower()
+                if domain.lstrip(".") == host or (
+                    domain.startswith(".") and host.endswith(domain)
+                ):
+                    sent.add(cookie.name)
+                elif "humblebundle.com" in domain:
+                    elsewhere.add(cookie.name)
         except Exception:
             pass
         header = (getattr(self.session, "headers", None) or {}).get("cookie") or ""
         for part in header.split(";"):
             name = part.split("=", 1)[0].strip()
             if name and "=" in part:
-                names.append(name)
-        return sorted(set(names))
+                sent.add(name)
+        return sorted(sent), sorted(elsewhere - sent)
 
     def _not_signed_in_message(self):
-        names = self._cookie_names()
-        sent = (
-            "the cookies sent were: " + ", ".join(names)
-            if names
-            else "no cookies for humblebundle.com were sent at all"
+        sent, elsewhere = self._cookie_names()
+        detail = (
+            "the cookies sent were: " + ", ".join(sent)
+            if sent
+            else "no cookies for this site were sent at all"
         )
+        if elsewhere:
+            detail += "; held but only for other hosts: " + ", ".join(elsewhere)
         return (
-            "Humble says this is not signed in ({sent}). The cookie is "
+            "Humble says this is not signed in ({detail}). The cookie is "
             "missing, is not the session one, or has expired. Sign in again "
-            "in your browser and pass a fresh one".format(sent=sent)
+            "in your browser and pass a fresh one".format(detail=detail)
         )
 
     def _call(self, name, path, session=None, data=None, files=None):
@@ -480,6 +493,15 @@ class HumbleSite:
                     "Bundle page {bundle_id} unusable ({error}), reading "
                     "its items one by one".format(bundle_id=bundle_id, error=error)
                 )
+
+        missing = [e for e in members if not (files.get(e["id"]) or {}).get("downloads")]
+        if len(missing) > 1:
+            # Each is its own request, about a second apiece. Worth
+            # saying, or a large bundle looks like a stalled run
+            logger.info(
+                "{count} item(s) of this bundle are not on its page, reading "
+                "them one at a time".format(count=len(missing))
+            )
 
         items = []
         for entry in members:
