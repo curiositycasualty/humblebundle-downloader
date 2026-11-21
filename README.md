@@ -180,8 +180,9 @@ files are removed, the cache keeps everything already finished, and the run exit
 **Ctrl+C again** quits immediately, whatever state anything is in. Partly downloaded files are left
 behind, and the next run replaces them.
 
-If a transfer is wedged somewhere that cannot be interrupted, the first Ctrl+C waits ten seconds
-for it before leaving anyway, so one press is always enough eventually and two are enough at once.
+If a transfer is wedged somewhere that cannot be interrupted, the first Ctrl+C waits up to five
+minutes for it before leaving anyway, so one press is always enough eventually and two are enough
+at once. Transfers that are moving stop at their next chunk, so in practice the wait is that short.
 `--exit-timeout SECONDS` changes that wait: `--exit-timeout 0` makes the first press quit straight
 away, a longer value gives slow drives and flaky connections more room to finish what they were
 doing. A second Ctrl+C ignores it entirely and quits at once however long it was set to.

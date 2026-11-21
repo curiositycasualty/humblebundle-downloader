@@ -119,8 +119,8 @@ def parse_args(args):
         metavar="SECONDS",
         help=(
             "How long the first Ctrl+C waits for downloads in flight "
-            "before quitting anyway (default: 10). 0 quits straight "
-            "away; a second Ctrl+C always does"
+            "before quitting anyway (default: 300, five minutes). 0 quits "
+            "straight away; a second Ctrl+C always does"
         ),
     )
     parser.add_argument(

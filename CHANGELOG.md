@@ -3,6 +3,9 @@
 
 ## Unreleased
 
+- The first Ctrl+C now waits up to five minutes for a stuck transfer by default, up from ten
+  seconds. Moving transfers still stop at their next chunk; `--exit-timeout` still overrides it and
+  a second Ctrl+C still quits at once
 - Works with Humble's rebuilt website. The json api the tool was built on (`/api/v1/user/order`,
   `/api/v1/order/<key>`) answers 404 since the 2026 rebuild, so nothing could be downloaded at all.
   The library is now read the way the website reads it, through its server actions, which are found

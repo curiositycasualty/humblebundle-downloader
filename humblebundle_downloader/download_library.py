@@ -32,8 +32,10 @@ DEFAULT_COOLDOWN = 30
 
 # Conventional exit status for "killed by SIGINT"
 INTERRUPT_EXIT_CODE = 130
-# How long a first Ctrl-C waits for transfers to wind themselves up
-SHUTDOWN_GRACE = 10
+# How long a first Ctrl-C waits for transfers to wind themselves up.
+# Ordinary transfers stop at their next chunk, well inside a second, so
+# this is only ever spent on one stuck somewhere it cannot notice
+SHUTDOWN_GRACE = 300
 
 
 class Interrupted(Exception):

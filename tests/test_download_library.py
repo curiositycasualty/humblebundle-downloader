@@ -1567,3 +1567,8 @@ def test_no_range_headers_without_a_start():
     dl = _with_session(session)
     dl._get_with_backoff("https://x/y.bin")
     assert session.calls[0][2]["headers"] is None
+
+
+def test_the_default_exit_wait_is_five_minutes():
+    assert SHUTDOWN_GRACE == 300
+    assert DownloadLibrary("x").shutdown_grace == 300.0
