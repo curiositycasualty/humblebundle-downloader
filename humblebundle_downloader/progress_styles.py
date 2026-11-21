@@ -20,6 +20,9 @@ PROGRESS_STYLES = {
     "bars": {"muncher": ("#",), "pellet": "-", "wake": "#"},
     # Solid blocks, for terminals with a good font
     "blocks": {"muncher": ("█",), "pellet": "░", "wake": "█"},
+    # A little train running down the rails, couplings stretching and
+    # bunching as it chuffs along, leaving puffs of steam behind it
+    "train": {"muncher": ("[]=[]=[]>", "[]-[]-[]>"), "pellet": "_", "wake": "°"},
 }
 
 DEFAULT_PROGRESS_STYLE = "fish"

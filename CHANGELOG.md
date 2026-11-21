@@ -3,6 +3,7 @@
 
 ## Unreleased
 
+- Added a `train` progress style: a little train running down the rails, leaving steam behind
 - The first Ctrl+C now waits up to five minutes for a stuck transfer by default, up from ten
   seconds. Moving transfers still stop at their next chunk; `--exit-timeout` still overrides it and
   a second Ctrl+C still quits at once

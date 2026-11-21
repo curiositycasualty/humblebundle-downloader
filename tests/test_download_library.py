@@ -1572,3 +1572,21 @@ def test_no_range_headers_without_a_start():
 def test_the_default_exit_wait_is_five_minutes():
     assert SHUTDOWN_GRACE == 300
     assert DownloadLibrary("x").shutdown_grace == 300.0
+
+
+def test_the_train_runs_down_the_rails_leaving_steam():
+    style = PROGRESS_STYLES["train"]
+    start = _muncher_bar(0.0, 20, style, 0)
+    middle = _muncher_bar(0.5, 20, style, 1)
+    end = _muncher_bar(1.0, 20, style, 0)
+    assert start == "[[]=[]=[]>" + "_" * 11 + "]"
+    assert middle.startswith("[" + "°" * 6 + "[]-[]-[]>")
+    assert end == "[" + "°" * 11 + "[]=[]=[]>]"
+    assert len({len(start), len(middle), len(end)}) == 1
+
+
+def test_the_cli_offers_the_train(capsys):
+    from humblebundle_downloader.cli import parse_args
+
+    args = parse_args(["-l", "x", "-s", "y", "--progress-style", "train"])
+    assert args.progress_style == "train"
