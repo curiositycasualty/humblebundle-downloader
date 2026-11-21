@@ -237,6 +237,13 @@ def _muncher_bar(fraction, width, style, frame):
         behind = style["pellet"] * position
         return "[" + behind + muncher + ahead + end + "]"
 
+    if style.get("exits"):
+        # Rides off the end instead of stopping at it: by 100% it has
+        # gone, leaving only what it left behind
+        position = int(round(max(0.0, min(1.0, fraction)) * width))
+        track = style["wake"] * position + muncher + style["pellet"] * width
+        return "[" + track[:width] + end + "]"
+
     position = int(round(max(0.0, min(1.0, fraction)) * span))
     return "[{wake}{muncher}{pellets}{end}]".format(
         wake=style["wake"] * position,

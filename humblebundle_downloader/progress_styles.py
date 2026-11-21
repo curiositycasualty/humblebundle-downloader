@@ -7,7 +7,7 @@ Each style is a muncher that eats its way along a track: `muncher` is
 the animation, one entry per frame, cycled as the display repaints;
 `pellet` is the track ahead of it and `wake` what it leaves behind.
 An optional `end` is drawn at the far end of the track, for the muncher
-to arrive at, and `scene` names a full sized picture to draw as well
+to arrive at, `exits` has it carry on off the end so 100% is all wake, and `scene` names a full sized picture to draw as well
 when there is room, which only the train has.
 
 Add your own. The only rule is that every frame of a style has to be
@@ -25,7 +25,13 @@ PROGRESS_STYLES = {
     "blocks": {"muncher": ("█",), "pellet": "░", "wake": "█"},
     # A light cycle racing across the grid, its rider tucking in and
     # out, leaving a solid wall of light behind it
-    "cycle": {"muncher": ("O='`o", "O=`'o"), "pellet": "·", "wake": "━"},
+    "cycle": {
+        "muncher": ("O='`o", "O=`'o"),
+        "pellet": "·",
+        "wake": "━",
+        # Rides off the end of the bar rather than stopping at it
+        "exits": True,
+    },
     # A little train running along the rails into a tunnel at the end,
     # couplings stretching and bunching as it chuffs along. With this
     # style the totals get the full sized train from sl, on its own

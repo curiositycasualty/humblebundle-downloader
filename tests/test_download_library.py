@@ -1696,9 +1696,25 @@ def test_the_cli_offers_the_train(capsys):
 def test_the_light_cycle_leaves_a_wall_of_light():
     style = PROGRESS_STYLES["cycle"]
     assert _muncher_bar(0.0, 20, style, 0) == "[O='`o" + "·" * 15 + "]"
-    assert _muncher_bar(1.0, 20, style, 1) == "[" + "━" * 15 + "O=`'o]"
     middle = _muncher_bar(0.5, 20, style, 0)
-    assert middle.index("O") == 1 + middle.count("━")
+    assert middle == "[" + "━" * 10 + "O='`o" + "·" * 5 + "]"
+
+
+def test_the_light_cycle_rides_off_the_end_at_100():
+    style = PROGRESS_STYLES["cycle"]
+    leaving = _muncher_bar(0.9, 20, style, 0)
+    assert leaving == "[" + "━" * 18 + "O=]"
+    assert _muncher_bar(1.0, 20, style, 1) == "[" + "━" * 20 + "]"
+    widths = {len(_muncher_bar(f / 20, 20, style, f)) for f in range(21)}
+    assert widths == {22}
+
+
+def test_only_the_cycle_exits():
+    for name, style in PROGRESS_STYLES.items():
+        if name != "cycle":
+            assert not style.get("exits")
+            # Still there at the end, not gone
+            assert style["muncher"][0] in _muncher_bar(1.0, 20, style, 0)
 
 
 ###
