@@ -251,11 +251,11 @@ def cli():
 
     jobs = resolve_jobs(cli_args)
 
-    from .download_library import DownloadLibrary, LibraryPathError
+    from .download_library import DownloadLibrary, LibraryPathError, FAILED_EXIT_CODE
     from .humble_site import SiteError
 
     try:
-        DownloadLibrary(
+        library = DownloadLibrary(
             cli_args.library_path,
             cookie_path=cli_args.cookie_file,
             cookie_auth=cli_args.session_auth,
@@ -277,8 +277,13 @@ def cli():
             verify=not cli_args.no_verify,
             shutdown_grace=cli_args.exit_timeout,
             log_skipped=not cli_args.hide_skipped,
-        ).start()
+        )
+        library.start()
     except (LibraryPathError, SiteError) as error:
         # Nothing to retry and nothing to show a traceback for: the
         # path is wrong, or the site said no, and the message says how
         sys.exit(str(error))
+
+    if library.failed_files:
+        # Finished, but not everything: say so to whatever ran us
+        sys.exit(FAILED_EXIT_CODE)

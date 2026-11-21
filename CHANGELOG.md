@@ -3,6 +3,10 @@
 
 ## Unreleased
 
+- A run that could not download some files now lists them at the end, with why, and exits `1`
+  instead of `0`, so a script or scheduled job can tell it from a clean run. A file the server
+  answers 404 or similar for was skipped silently before, at debug level. Interrupted runs still
+  exit `130`, and files a stopped run did not get to are not counted as failures
 - The cache is now written at most every five seconds, and once more when the run ends however it
   ends, instead of being rewritten in full and flushed to disk after every file. Over a large
   library that was gigabytes of writes, with every other download waiting on each one. A run killed

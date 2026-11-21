@@ -71,6 +71,9 @@ _If using the docker image, exclude the `hbd` part of the command_
 This directory structure will be used:  
 `Downloaded Library/Purchase Name/Item Name/downloaded_file.ext`
 
+A run that finished but could not download some files lists them at the end, with why, and exits
+`1`, so scripts and scheduled jobs can tell it from a clean run, which exits `0`.
+
 If a run stops with a message about signing in, the cookie has expired: sign in again in your
 browser and pass the new one. That is reported as an error rather than as an empty library.
 

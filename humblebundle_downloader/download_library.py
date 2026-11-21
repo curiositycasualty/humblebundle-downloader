@@ -35,6 +35,10 @@ DEFAULT_COOLDOWN = 30
 
 # Conventional exit status for "killed by SIGINT"
 INTERRUPT_EXIT_CODE = 130
+# Exit status for a run that finished but gave up on some files
+FAILED_EXIT_CODE = 1
+# How many of those the end of the run names, before "and N more"
+FAILURES_LISTED = 20
 # Longest the cache goes unwritten while files are being recorded
 CACHE_FLUSH_SECONDS = 5.0
 # How long a first Ctrl-C waits for transfers to wind themselves up.
@@ -1069,6 +1073,9 @@ class DownloadLibrary:
         self.adopted_count = 0
         # Files Humble has replaced without updating its listing
         self.stale_listings = 0
+        # (path, why) for every file this run gave up on, so the run can
+        # say which, and exit non-zero rather than look like a success
+        self.failed_files = []
 
         # The library as the rebuilt website presents it. Built in
         # start(), once the session has its cookies
@@ -1248,6 +1255,25 @@ class DownloadLibrary:
                     now=self._gate.limit, rate=_human_size(rate), limit=limit
                 )
             )
+
+        if self.failed_files:
+            logger.error(
+                "{count} file(s) could not be downloaded, and will be tried "
+                "again next run:".format(count=len(self.failed_files))
+            )
+            for local_file, reason in self.failed_files[:FAILURES_LISTED]:
+                logger.error(
+                    "  {path} ({reason})".format(
+                        path=os.path.relpath(local_file, self.library_path),
+                        reason=reason,
+                    )
+                )
+            if len(self.failed_files) > FAILURES_LISTED:
+                logger.error(
+                    "  ...and {more} more".format(
+                        more=len(self.failed_files) - FAILURES_LISTED
+                    )
+                )
 
         if self.stale_listings:
             logger.warning(
@@ -1561,11 +1587,15 @@ class DownloadLibrary:
                     self._run_download_job(job)
                 finally:
                     self._gate.release()
-            except Exception:
+            except Exception as error:
                 logger.exception(
                     "Failed to download {remote_file}".format(
                         remote_file=job.get("remote_file")
                     )
+                )
+                self._record_failure(
+                    os.path.join(job.get("local_folder", ""), job.get("local_filename", "")),
+                    str(error) or type(error).__name__,
                 )
             finally:
                 self._queue.task_done()
@@ -2391,6 +2421,9 @@ class DownloadLibrary:
         remote_file_r = self._get_with_backoff(remote_file)
         if remote_file_r is None:
             self._note_skip()
+            self._record_failure(
+                os.path.join(local_folder, local_filename), "no answer from the server"
+            )
             return False
 
         # Check to see if the file still exists
@@ -2401,6 +2434,10 @@ class DownloadLibrary:
                 )
             )
             self._note_skip()
+            self._record_failure(
+                os.path.join(local_folder, local_filename),
+                "the server answered http {0}".format(remote_file_r.status_code),
+            )
             return False
 
         logger.debug(
@@ -2450,6 +2487,7 @@ class DownloadLibrary:
             os.makedirs(os.path.dirname(local_file), exist_ok=True)  # noqa: E701
         except OSError as error:
             self._folder_unusable(local_file, error)
+            self._record_failure(local_file, "its folder could not be made")
             return False
 
         self._log_url(remote_file)
@@ -2519,6 +2557,7 @@ class DownloadLibrary:
                         local_filename=local_filename
                     )
                 )
+                self._record_failure(local_filename, str(e) or type(e).__name__)
 
             self._progress.file_finished(label, ok=False)
             self._progress.clear()
@@ -2722,6 +2761,14 @@ class DownloadLibrary:
                 print("{sha1}  {path}".format(sha1=sha1, path=path))
             else:
                 print("# no sha1 listed: {path}".format(path=path))
+
+    def _record_failure(self, local_file, reason):
+        """A file this run gave up on. A run being stopped is not a
+        failure of the files it did not get to"""
+        if self._stop.is_set():
+            return
+        with self._notice_lock:
+            self.failed_files.append((local_file, reason))
 
     def _listing_is_stale(self, label, part_file, listed_size):
         """Whether a checksum that does not match is Humble's listing

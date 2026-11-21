@@ -114,6 +114,8 @@ class FakeHumble(FakeSite):
             self.cdn_gets.append((name, token, dict(headers or {})))
         if int(token) in self.revoked:
             return CdnResponse(b"", 403, url)
+        if name in getattr(self, "missing", ()):
+            return CdnResponse(b"", 404, url)
         body = self.bodies[name]
         start = 0
         if headers and headers.get("Range"):
@@ -561,3 +563,65 @@ def test_files_finished_before_a_run_fails_are_still_saved_to_the_cache(tmp_path
     saved = cache_of(tmp_path)
     assert {"b1:one.pdf", "b1:one.epub", "b1:two.pdf"} <= set(saved)
     assert "b2:game.exe" not in saved
+
+
+
+###
+# failed files
+###
+def test_a_file_the_server_does_not_have_is_a_named_failure(tmp_path, caplog):
+    import logging
+
+    caplog.set_level(logging.INFO)
+    fake = FakeHumble(*two_bundles())
+    fake.missing = {"one.epub"}
+    dl = library(tmp_path, fake, jobs=2)
+    dl.start()
+    assert [(os.path.basename(p), why) for p, why in dl.failed_files] == [
+        ("one.epub", "the server answered http 404")
+    ]
+    assert "1 file(s) could not be downloaded" in caplog.text
+    assert os.path.join("Bundle One", "Book One", "one.epub") in caplog.text
+    assert "b1:one.epub" not in cache_of(tmp_path)
+    assert "b1:one.pdf" in cache_of(tmp_path)
+
+
+def test_a_damaged_file_is_a_named_failure(tmp_path):
+    entries, pages = two_bundles()
+    damaged = b"z" * len(BODIES["two.pdf"])
+    fake = FakeHumble(entries, pages, bodies=dict(BODIES, **{"two.pdf": damaged}))
+    dl = library(tmp_path, fake, jobs=1, retries=0)
+    dl.start()
+    assert len(dl.failed_files) == 1
+    path, why = dl.failed_files[0]
+    assert path.endswith("two.pdf") and "sha1" in why
+
+
+def test_a_clean_run_has_no_failures(tmp_path):
+    dl = library(tmp_path, FakeHumble(*two_bundles()), jobs=3)
+    dl.start()
+    assert dl.failed_files == []
+
+
+def test_files_not_reached_because_the_run_stopped_are_not_failures(tmp_path):
+    dl = DownloadLibrary(str(tmp_path))
+    dl._stop.set()
+    dl._record_failure("/x/y.pdf", "whatever")
+    assert dl.failed_files == []
+
+
+@pytest.mark.parametrize("failed,code", [([], None), ([("a.pdf", "http 404")], 1)])
+def test_the_cli_exits_non_zero_only_when_something_failed(monkeypatch, failed, code):
+    from humblebundle_downloader import cli as cli_module
+
+    def start(self):
+        self.failed_files = list(failed)
+
+    monkeypatch.setattr(DownloadLibrary, "start", start)
+    monkeypatch.setattr(cli_module.sys, "argv", ["hbd", "-s", "x", "-l", "lib"])
+    if code is None:
+        assert cli_module.cli() is None
+    else:
+        with pytest.raises(SystemExit) as stopped:
+            cli_module.cli()
+        assert stopped.value.code == code
