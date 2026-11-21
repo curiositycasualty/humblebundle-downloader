@@ -904,3 +904,57 @@ def test_a_new_version_only_a_little_smaller_is_taken_as_usual(tmp_path):
     dl.start()
     assert (tmp_path / "lib" / "Bundle Two" / "Game" / "game.exe").read_bytes() == slightly
     assert dl.smaller_files == []
+
+
+###
+# --prefer-format's fallback, by real sizes
+###
+def two_formats(pdf_listed, cbz_listed, pdf_body, cbz_body):
+    def struct(name, body, listed, kind):
+        s = real_struct(name, body=body, kind=kind)
+        s["fileSize"] = listed                # the listing, out of date
+        s["md5"] = s["sha1"] = None
+        return s
+
+    entries = [entry("w1", "bw", "Wytches", "Comics")]
+    pages = {"/home/library/bw": bundle_page("bw", "Comics", entitlement(
+        "w1", "Wytches", download("wytches_ebook", "ebook",
+                                  struct("wytches.cbz", cbz_body, cbz_listed, "CBZ"),
+                                  struct("wytches.pdf", pdf_body, pdf_listed, "PDF")),
+    ))}
+    return FakeHumble(entries, pages, bodies={"wytches.cbz": cbz_body, "wytches.pdf": pdf_body})
+
+
+def test_the_fallback_picks_the_largest_by_what_is_served(tmp_path, caplog):
+    import logging
+
+    caplog.set_level(logging.INFO)
+    # Listed: the pdf three times the cbz. Served: the cbz is bigger
+    fake = two_formats(pdf_listed=3000, cbz_listed=1000,
+                       pdf_body=b"p" * 900, cbz_body=b"c" * 1000)
+    library(tmp_path, fake, jobs=1, prefer_format=["epub"]).start()
+    assert files_under(tmp_path / "lib") == ["Comics/Wytches/wytches.cbz"]
+    assert "taking the largest file (cbz 1000 B, pdf 900 B)" in caplog.text
+
+
+def test_the_fallback_works_in_a_dry_run_too(tmp_path):
+    fake = two_formats(3000, 1000, b"p" * 900, b"c" * 1000)
+    dl = library(tmp_path, fake, dry_run=True, prefer_format=["epub"])
+    dl.start()
+    assert [os.path.basename(p["local_file"]) for p in dl.pending_downloads] == ["wytches.cbz"]
+
+
+def test_the_fallback_uses_the_listing_when_the_server_cannot_say(tmp_path):
+    fake = two_formats(3000, 1000, b"p" * 900, b"c" * 1000)
+    fake.missing = {"wytches.pdf", "wytches.cbz"}
+    dl = library(tmp_path, fake, dry_run=True, prefer_format=["epub"])
+    dl.start()
+    assert [os.path.basename(p["local_file"]) for p in dl.pending_downloads] == ["wytches.pdf"]
+
+
+def test_a_preferred_format_needs_no_sizes_at_all(tmp_path):
+    fake = two_formats(3000, 1000, b"p" * 900, b"c" * 1000)
+    dl = library(tmp_path, fake, dry_run=True, prefer_format=["pdf"])
+    dl.start()
+    assert [os.path.basename(p["local_file"]) for p in dl.pending_downloads] == ["wytches.pdf"]
+    assert fake.cdn_gets == [] and fake.sign_calls == []

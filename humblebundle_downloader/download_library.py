@@ -1752,18 +1752,42 @@ class DownloadLibrary:
                 )
                 return passthrough + [entry[0] for entry in chosen]
 
-        # No preferred format available, so take the biggest file there is
-        largest = max(
-            candidates,
-            key=lambda entry: _coerce_size(entry[0].get("file_size")) or 0,
-        )
+        # No preferred format available, so take the biggest file there
+        # is, by what the server sends now rather than what Humble lists
+        sizes = [self._real_size(entry[0], entry[1]) for entry in candidates]
+        biggest = max(range(len(candidates)), key=lambda i: sizes[i] or 0)
+        largest = candidates[biggest]
         self._log_format_choice(
-            product_title, platform, None, candidates, [largest]
+            product_title, platform, None, candidates, [largest], sizes
         )
         return passthrough + [largest[0]]
 
+    def _real_size(self, file_type, filename):
+        """A file's size as the server has it now.
+
+        Humble's listing gives the sizes of files from before it
+        regenerated them, sometimes three times what is sent now, so
+        "the largest" by the listing can be the wrong choice. For files
+        from the rebuilt site one HEAD settles it; entries carrying a
+        real url, as the old api gave, were listed accurately and are
+        not asked about. When the server cannot say, the listing will do
+        """
+        listed = _coerce_size(file_type.get("file_size"))
+        signing = file_type.get("hbd_sign")
+        if not signing or self._signer is None:
+            return listed
+        url = SignedUrl(
+            self._signer,
+            signing["entitlement"],
+            signing["download_key"],
+            filename,
+            vault=bool(signing.get("vault")),
+        )
+        headers = self._get_remote_headers(url)
+        return _coerce_size((headers or {}).get("Content-Length")) or listed
+
     def _log_format_choice(
-        self, product_title, platform, wanted, candidates, chosen
+        self, product_title, platform, wanted, candidates, chosen, sizes=None
     ):
         dropped = [
             entry[1] for entry in candidates if entry not in chosen
@@ -1772,6 +1796,11 @@ class DownloadLibrary:
             return
         if wanted is None:
             reason = "no preferred format available, taking the largest file"
+            if sizes and all(sizes):
+                reason += " ({0})".format(", ".join(
+                    "{0} {1}".format(entry[2] or entry[1], _human_size(size))
+                    for entry, size in zip(candidates, sizes)
+                ))
         else:
             reason = "preferring {wanted}".format(wanted=wanted)
         self._log_skip(

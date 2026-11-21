@@ -360,6 +360,10 @@ those names would break it.
 
 Library entries that are keys for Steam, Epic, GOG and so on are left alone, as they always were.
 
+When none of the preferred formats is offered, the largest file is taken, by what the server sends
+now: one `HEAD` request per format settles it, since Humble's listed sizes are from before it
+regenerated its files, and can be three times what is sent.
+
 ### Upgrading from a version before the rebuild
 
 The rebuilt site identifies bundles by new ids, so none of the entries in an older `.cache.json`

@@ -3,6 +3,9 @@
 
 ## 0.5.0
 
+- `--prefer-format`'s fallback, when none of the preferred formats is offered, now takes the
+  largest file by what the server sends, asking with one `HEAD` per format, rather than by
+  Humble's listed sizes, which for regenerated files are the old ones
 - Files Humble now sends much smaller than the one on disk (under 75% of its size) no longer replace
   it: Humble regenerated most of its catalogue in November 2026, and many files came out far more
   compressed, with the originals no longer offered anywhere, torrents included. A run keeps such a
