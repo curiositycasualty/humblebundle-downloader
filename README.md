@@ -160,7 +160,10 @@ forth instead of a percentage. Slots are stable, so a finished transfer leaves i
 the next one rather than making the other lines jump about. The totals line counts files rather
 than bytes, and only grows a bar once everything has been queued and the denominator is final.
 
-`--progress-style` picks the muncher: `fish` (the default), `snail`, `cycle`, `train`, `bars` or `blocks`. They live
+`--progress-style` picks the muncher. Most travel along the bar and leave it as the file completes:
+`fish` (the default), `snail`, `cycle`, `train` (into a tunnel), `rocket`, `runner`, `duck`, `car`,
+`comet` and `ufo`. A few travel to something at the end and arrive as it completes: `mouse` (to the
+cheese), `arrow` (into the target) and `worm` (to the apple). `bars` and `blocks` just fill. They live
 in `progress_styles.py`, which is a plain dict with no imports, so adding your own is a two line
 change — the only rule is that every frame of a style has to be the same width, or the bar jitters
 as it animates.

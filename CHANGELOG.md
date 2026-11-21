@@ -3,6 +3,9 @@
 
 ## Unreleased
 
+- Added nine progress styles: `rocket`, `runner`, `duck`, `car`, `comet` and `ufo`, which leave the bar
+  as the file completes, and `mouse`, `arrow` and `worm`, which arrive at the cheese, the target and
+  the apple at the end of it
 - The train now runs into its tunnel, and the fish and snail off the end of the bar, at 100%, as the
   light cycle does, instead of stopping at the end. `bars` and `blocks` just fill
 - Added `-j auto`: start at 4 downloads at once and find the fastest number while the run goes,

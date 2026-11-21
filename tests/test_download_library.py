@@ -1711,24 +1711,60 @@ def test_the_light_cycle_rides_off_the_end_at_100():
     assert widths == {22}
 
 
-TRAVELLERS = {"cycle", "train", "fish", "snail"}
+def _kinds():
+    exits, arrivals, plain = [], [], []
+    for name, style in sorted(PROGRESS_STYLES.items()):
+        if style.get("exits"):
+            exits.append(name)
+        elif style.get("end"):
+            arrivals.append(name)
+        else:
+            plain.append(name)
+    return exits, arrivals, plain
 
 
-@pytest.mark.parametrize("name", sorted(TRAVELLERS))
+EXITS, ARRIVALS, PLAIN = _kinds()
+
+
+def test_every_kind_of_style_is_represented():
+    assert {"cycle", "train", "fish", "snail", "rocket", "runner", "duck",
+            "car", "comet", "ufo"} <= set(EXITS)
+    assert {"mouse", "arrow", "worm"} <= set(ARRIVALS)
+    assert {"bars", "blocks"} <= set(PLAIN)
+
+
+@pytest.mark.parametrize("name", EXITS)
 def test_travellers_leave_the_bar_at_100(name):
     style = PROGRESS_STYLES[name]
-    assert style.get("exits")
+    end = style.get("end", "")
     done = _muncher_bar(1.0, 20, style, 0)
-    assert done == "[" + style["wake"] * (20 - len(style.get("end", ""))) + style.get("end", "") + "]"
-    # And are in it at the start
+    assert done == "[" + style["wake"] * (20 - len(end)) + end + "]"
     assert style["muncher"][0] in _muncher_bar(0.0, 20, style, 0)
 
 
-def test_plain_bars_just_fill():
-    for name, style in PROGRESS_STYLES.items():
-        if name not in TRAVELLERS:
-            assert not style.get("exits")
-            assert _muncher_bar(1.0, 20, style, 0) == "[" + style["wake"] * 20 + "]"
+@pytest.mark.parametrize("name", ARRIVALS)
+def test_arrivals_end_up_at_whatever_is_at_the_end(name):
+    style = PROGRESS_STYLES[name]
+    done = _muncher_bar(1.0, 20, style, 0)
+    assert done.endswith(style["muncher"][0] + style["end"] + "]")
+    start = _muncher_bar(0.0, 20, style, 0)
+    assert start.startswith("[" + style["muncher"][0])
+
+
+@pytest.mark.parametrize("name", PLAIN)
+def test_plain_bars_just_fill(name):
+    style = PROGRESS_STYLES[name]
+    assert _muncher_bar(1.0, 20, style, 0) == "[" + style["wake"] * 20 + "]"
+
+
+@pytest.mark.parametrize("name", sorted(PROGRESS_STYLES))
+def test_every_style_is_the_same_width_all_the_way(name):
+    style = PROGRESS_STYLES[name]
+    widths = {
+        len(_muncher_bar(step / 40, 20, style, step)) for step in range(41)
+    }
+    widths.add(len(_muncher_bar(None, 20, style, 3)))
+    assert widths == {22}
 
 
 ###

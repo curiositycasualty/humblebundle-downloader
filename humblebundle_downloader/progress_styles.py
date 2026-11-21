@@ -32,6 +32,24 @@ PROGRESS_STYLES = {
         # Rides off the end of the bar rather than stopping at it
         "exits": True,
     },
+    # A mouse nibbling its way along the crumbs to the cheese
+    "mouse": {"muncher": ("~( 3:>", "~( 3;>"), "pellet": "·", "wake": " ", "end": "◣"},
+    # An arrow in flight, which thunks into the target as the file lands
+    "arrow": {"muncher": (">>--->", ">>--->"), "pellet": " ", "wake": " ", "end": "(◎)"},
+    # A worm wriggling along to the apple
+    "worm": {"muncher": ("~~:)", "-~:)"), "pellet": "·", "wake": " ", "end": "Q"},
+    # A rocket, exhaust behind it, off into space
+    "rocket": {"muncher": ("=]>", "≡]>"), "pellet": "·", "wake": "~", "exits": True},
+    # Someone sprinting, arms pumping, straight off the end
+    "runner": {"muncher": ("ε=┌(^-^)┘", "ε=└(^-^)┐"), "pellet": " ", "wake": " ", "exits": True},
+    # A duck paddling along, quacking, ripples spreading behind it
+    "duck": {"muncher": ("_(')>", "_(')="), "pellet": " ", "wake": "~", "exits": True},
+    # A car with its wheels turning, past the lane markings
+    "car": {"muncher": ("[o=o]>", "[0=0]>"), "pellet": "-", "wake": "_", "exits": True},
+    # A comet twinkling through the stars, its tail behind it
+    "comet": {"muncher": ("*", "✦"), "pellet": "·", "wake": "=", "exits": True},
+    # A flying saucer, lights blinking, leaving a beam behind it
+    "ufo": {"muncher": ("<o>", "<*>"), "pellet": " ", "wake": "'", "exits": True},
     # A little train running along the rails into a tunnel at the end,
     # couplings stretching and bunching as it chuffs along. With this
     # style the totals get the full sized train from sl, on its own
