@@ -3,6 +3,27 @@
 
 ## Unreleased
 
+- Works with Humble's rebuilt website. The json api the tool was built on (`/api/v1/user/order`,
+  `/api/v1/order/<key>`) answers 404 since the 2026 rebuild, so nothing could be downloaded at all.
+  The library is now read the way the website reads it, through its server actions, which are found
+  by name in the site's own scripts at the start of each run rather than written into the tool: their
+  ids change with every deploy, and did while this was being written
+- Download urls are asked for just before each file is downloaded, by the worker about to download
+  it, rather than all up front. They expire after about a day, and a large library takes longer than
+  that. A url that is refused is asked for again, once
+- A run that finds itself signed out, at the start or part way through, now stops with a message
+  saying so and a non-zero exit, instead of finishing as though the library were empty
+- Files already on disk where the run would put them, at exactly the size the site lists, are now
+  recorded in the cache rather than downloaded again. Without this, upgrading would have meant
+  downloading a whole library a second time, because the rebuilt site's bundle ids match no existing
+  cache entry. The first `--update` to reach such a file records the server's date for it instead of
+  treating the missing date as a change
+- `--session-auth` also accepts a whole cookie header (`name=value; ...`), for when the session
+  cookie is not `_simpleauth_sess`
+- `--keys` now takes bundle ids from library page urls (`/home/library/<id>`); the old purchase keys
+  do not exist on the rebuilt site
+- `--trove` stops straight away with an explanation: the Trove was removed from the site, and its
+  endpoints answer 404. The code for it has been removed
 - Added `--hide-skipped` to turn off the line logged for every file a filter passes over, which is
   most of the output on a run that filters most of a library out. The lines drop to debug rather
   than disappearing, and orders that could not be read are still reported as errors

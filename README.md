@@ -11,7 +11,7 @@ After that it will only download the content that has been updated or is missing
 
 ## Features
 
-- support for Humble Trove _(`--trove` flag)_
+- works with Humble's rebuilt website (2026), which removed the api older versions relied on
 - downloads new and updated content from your Humble Bundle Library on each run _(only check for updates if using `--update`)_
 - cli command for easy use (downloading will also work on a headless system)
 - works for SSO and 2FA accounts
@@ -47,9 +47,14 @@ First thing to do is get your account cookies.
 This can be done by getting a browser extension that lets you see or export your cookies.
 
 - **Method 1 (recommended)**
-    - Get the value of the cookie called `_simpleauth_sess` and pass that value using `-s 'COOKIE_VALUE'`
-    - Note: The quotes in the cookie value are part of the value, you might need to wrap the entire value
-      (including double quotes) in single quotes. Some suggestions for common issues can be found in [issue #50](https://github.com/xtream1101/humblebundle-downloader/issues/50)
+    - Sign in at humblebundle.com, open your browser's developer tools, go to the **Network** tab and
+      reload your library page. Click the request for `library`, find the `Cookie` request header, and
+      copy its whole value. Pass it using `-s 'COOKIE HEADER'`, single quotes included.
+    - This works whatever the session cookie is called. Since the 2026 rebuild Humble signs you in on
+      `auth.humblebundle.com`, so the cookie older instructions named may not be the one that matters.
+    - A bare `_simpleauth_sess` value is still accepted, as before: anything that is not
+      `name=value` is taken to be one. Some suggestions for common issues can be found in
+      [issue #50](https://github.com/xtream1101/humblebundle-downloader/issues/50)
 
 - **Method 2**
     - Export the cookies in the Netscape format using an extension.  
@@ -65,6 +70,9 @@ _If using the docker image, exclude the `hbd` part of the command_
 
 This directory structure will be used:  
 `Downloaded Library/Purchase Name/Item Name/downloaded_file.ext`
+
+If a run stops with a message about signing in, the cookie has expired: sign in again in your
+browser and pass the new one. That is reported as an error rather than as an empty library.
 
 The library path is checked before anything else happens. If it does not exist it is created; if it
 cannot be created or written to, the run stops right there with one line saying why, rather than
@@ -95,12 +103,12 @@ Dry run: nothing was downloaded
 4 file(s) to download, 3.41 GiB (3,663,212,288 bytes)
 ```
 
-The estimate honours every other flag, so `-n` combined with `--include`, `--platform`, `--keys`,
-`--trove` or `--update` tells you the size of exactly that subset.
-Sizes come from the Humble Bundle api itself, so this costs no bandwidth beyond the api calls a real
-run already makes. For the few files the api does not report a size for, a `HEAD` request is used
-instead, and anything that still comes back without a size is counted separately at the end of the
-summary.
+The estimate honours every other flag, so `-n` combined with `--include`, `--platform`, `--keys`
+or `--update` tells you the size of exactly that subset.
+Sizes come from your library pages, the same ones the website shows, so a dry run asks Humble for
+no download urls at all and transfers nothing. For the few files with no size listed, a `HEAD`
+request is used instead, and anything that still comes back without a size is counted separately at
+the end of the summary.
 
 
 ### 4. Listing the download urls
@@ -112,8 +120,9 @@ another tool:
 `hbd --cookie-file cookies.txt --library-path "Downloaded Library" --dry-run --print-urls > urls.txt`
 
 This works during a real download too, in which case it lists each file as it is fetched.
-Note that Humble Bundle urls are signed and expire after a while, so a saved list is only good for
-a short time.
+Humble only hands out a download url on request, so with `--dry-run` this asks for one per item,
+which takes about half a second each: a whole library takes a while. The urls are signed and stop
+working after roughly a day, so a saved list is only good for a short time.
 
 
 ### 5. Parallel downloads
@@ -264,6 +273,41 @@ collapses format variants, never content.
 to see exactly which file wins for each item before downloading anything.
 
 
+## How it reads the rebuilt site
+
+In 2026 Humble rebuilt its website and removed the json api this tool used to read the library
+from. The website now gets everything through its own server actions: functions the page calls by
+name. This tool calls the same ones, in the same way the page does:
+
+- the whole library is listed a thousand entries at a time, so a large library takes a few requests
+- each bundle's page supplies every file in it, with its size and checksums, in one request
+- a download url is only asked for when a file is about to be downloaded, never ahead of time.
+  They expire, and a large library takes longer to download than they last. A url that is refused
+  part way through is simply asked for again
+
+Server actions are addressed by ids that change every time Humble updates the site, so none are
+written into this tool. Each run finds them by name in the site's own scripts, and only a change to
+those names would break it.
+
+Library entries that are keys for Steam, Epic, GOG and so on are left alone, as they always were.
+
+### Upgrading from a version before the rebuild
+
+The rebuilt site identifies bundles by new ids, so none of the entries in an older `.cache.json`
+match any more. Rather than download everything again, a file already on disk at the place this run
+would save it, and at exactly the size the site lists, is recorded in the cache as downloaded and
+left alone. The run reports how many files that applied to. Run with `--dry-run` first to see what
+would still be downloaded.
+
+The first `--update` run to reach such a file records the date the server reports for it, without
+downloading it, so later updates have something to compare against.
+
+### The Humble Trove
+
+The Trove is gone from the rebuilt site (it became the subscriber vault) and both endpoints `--trove`
+used now answer 404, so `--trove` stops straight away with a message saying so.
+
+
 ## Notes
 
 - Inside your library folder a file named `.cache.json` is saved and keeps track of the files that have been downloaded.
@@ -277,7 +321,6 @@ to see exactly which file wins for each item before downloading anything.
 - Find supported platforms for the `--platform` flag by visiting your Humble Bundle Library
   and look under the **Platform** dropdown
 - Download select bundles by using the `-k` or `--keys` flag.
-  Find these keys by going to your _Purchases_ section,
-  click on a products and there should be a `downloads?key=XXXX` in the url.
-  A key given more than once is only used once, and the same goes for duplicates coming back from
-  your own library page, so nothing is fetched or downloaded twice.
+  These are the ids at the end of a bundle's page in your library, `/home/library/<id>`. The
+  thirteen character purchase keys older versions used do not appear on the rebuilt site.
+  A key given more than once is only used once, so nothing is fetched or downloaded twice.

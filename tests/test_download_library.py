@@ -32,7 +32,6 @@ from humblebundle_downloader.download_library import (
     _digest_of,
     _feed_hash_from_file,
     _struct_hashes,
-    _trove_stamp,
     _validator_for,
     _unique_keys,
     ProgressReporter,
@@ -340,74 +339,39 @@ def test_order_error_lists_keys_when_nothing_else_is_known():
     assert "gamekey" in reason and "uploaded_at" in reason
 
 
-class FakeOrderResponse:
-    def __init__(self, payload, status_code=200, valid_json=True):
-        self._payload = payload
-        self.status_code = status_code
-        self._valid_json = valid_json
-
-    def json(self):
-        if not self._valid_json:
-            raise ValueError("not json")
-        return self._payload
-
-
 GOOD_ORDER = {
     "product": {"human_name": "Real Bundle"},
     "subproducts": [],
 }
 
 
-class OrderSession:
-    def __init__(self, responses):
-        self.responses = responses
-        self.headers = {}
-        self.cookies = {}
-
-    def get(self, url, **kwargs):
-        for key, response in self.responses.items():
-            if "/order/" + key in url:
-                return response
-        raise AssertionError("unexpected url " + url)
-
-
-def _run_orders(responses):
-    dl = DownloadLibrary(
-        "fake_library_path", purchase_keys=list(responses), dry_run=True
-    )
-    dl.session = OrderSession(responses)
+def _run_orders(orders):
+    dl = DownloadLibrary("fake_library_path", dry_run=True)
     dl.cache_data = {}
     dl.cache_file = "fake_library_path/.cache.json"
-    for order_id in dl.purchase_keys:
-        dl._process_order_id(order_id)
+    for order_id, order in orders.items():
+        dl._process_order(order_id, order)
     return dl
 
 
 def test_order_without_product_is_skipped_not_fatal():
-    dl = _run_orders({"bad": FakeOrderResponse({"_errors": "Unauthorized"})})
+    dl = _run_orders({"bad": {"_errors": "Unauthorized"}})
     assert dl.skipped_orders == ["bad"]
 
 
-def test_order_that_is_not_json_is_skipped():
-    dl = _run_orders(
-        {"bad": FakeOrderResponse(None, status_code=503, valid_json=False)}
-    )
+def test_order_that_is_not_a_mapping_is_skipped():
+    dl = _run_orders({"bad": None})
     assert dl.skipped_orders == ["bad"]
 
 
 def test_one_bad_order_does_not_stop_the_others():
-    dl = _run_orders({
-        "bad": FakeOrderResponse({"_errors": "Unauthorized"}),
-        "good": FakeOrderResponse(GOOD_ORDER),
-    })
+    dl = _run_orders({"bad": {"_errors": "Unauthorized"}, "good": GOOD_ORDER})
     assert dl.skipped_orders == ["bad"]
     assert dl._current_bundle == "Real Bundle"
 
 
 def test_order_without_subproducts_does_not_crash():
-    dl = _run_orders(
-        {"thin": FakeOrderResponse({"product": {"human_name": "Thin"}})}
-    )
+    dl = _run_orders({"thin": {"product": {"human_name": "Thin"}}})
     assert dl.skipped_orders == []
     assert dl._current_bundle == "Thin"
 
@@ -1278,16 +1242,6 @@ def test_a_real_rename_date_is_parsed():
     assert DownloadLibrary._cache_rename_date(
         {"url_last_modified": "Mon, 01 Jan 2024 00:00:00 GMT"}
     ) == "2024-01-01"
-
-
-@pytest.mark.parametrize("raw", ["not a number", "", None, [], {}, "9" * 40])
-def test_an_unusable_trove_stamp_is_ignored(raw):
-    assert _trove_stamp(raw) is None
-
-
-def test_a_real_trove_stamp_is_parsed():
-    assert _trove_stamp("1600000000") is not None
-    assert _trove_stamp(1600000000) is not None
 
 
 def test_the_cache_is_written_through_a_temporary_file(tmp_path):

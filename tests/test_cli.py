@@ -87,3 +87,32 @@ def test_skip_lines_can_be_hidden():
         ["-l", "some_path", "-c", "fake_cookie", "--hide-skipped"]
     )
     assert args.hide_skipped is True
+
+
+@pytest.mark.parametrize("error_name", ["NotSignedIn", "SiteError"])
+def test_site_errors_exit_with_the_message_not_a_traceback(monkeypatch, error_name):
+    from humblebundle_downloader import cli as cli_module
+    from humblebundle_downloader import download_library, humble_site
+
+    error = getattr(humble_site, error_name)("sign in again, the cookie expired")
+
+    def refuse(self):
+        raise error
+
+    monkeypatch.setattr(download_library.DownloadLibrary, "start", refuse)
+    monkeypatch.setattr(
+        cli_module.sys, "argv", ["hbd", "-s", "x", "-l", "lib", "-n"]
+    )
+    with pytest.raises(SystemExit) as stopped:
+        cli_module.cli()
+    assert str(stopped.value.code) == "sign in again, the cookie expired"
+
+
+def test_keys_help_points_at_the_library_page():
+    import contextlib
+    import io
+
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out), pytest.raises(SystemExit):
+        parse_args(["--help"])
+    assert "/home/library/<id>" in " ".join(out.getvalue().split())

@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import json
 import time
@@ -18,6 +19,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from .progress_styles import PROGRESS_STYLES, DEFAULT_PROGRESS_STYLE
+from .humble_site import HumbleSite, NotSignedIn, SignedUrl, SiteError, UrlSigner
 
 logger = logging.getLogger(__name__)
 
@@ -102,19 +104,13 @@ def _feed_hash_from_file(hasher, path):
             hasher.update(block)
 
 
-def _trove_stamp(raw):
-    """Date to tag an older trove file with, or None when the cache
-    holds something that is not a timestamp
+def _looks_like_cookie_header(value):
+    """name=value, as opposed to a bare session value.
+
+    A bare value can be base64 and end in = padding, but padding only
+    ever comes at the end, so an = with something after it means a name
     """
-    if raw is None:
-        return None
-    try:
-        return time.strftime("%Y-%m-%d", time.localtime(int(raw)))
-    except (TypeError, ValueError, OSError, OverflowError):
-        logger.debug(
-            "Cache holds an unusable uploaded_at: {raw!r}".format(raw=raw)
-        )
-        return None
+    return re.match(r"^\s*[^=;\s\"]+=[^=]", value or "") is not None
 
 
 def _unique_keys(keys):
@@ -831,6 +827,15 @@ class DownloadLibrary:
         self.unexpanded_asmjs = 0
         self.skipped_orders = []
         self._current_bundle = ""
+        # Files already on disk at the expected size that the cache did
+        # not know about, which is every file after the site rebuild:
+        # bundles are keyed by new ids, so no old cache entry matches
+        self.adopted_count = 0
+
+        # The library as the rebuilt website presents it. Built in
+        # start(), once the session has its cookies
+        self.site = None
+        self._signer = None
 
         self.session = self._configure_session(requests.Session())
         if cookie_path:
@@ -843,9 +848,13 @@ class DownloadLibrary:
                 with open(cookie_path, "r") as f:
                     self.session.headers.update({"cookie": f.read().strip()})
         elif cookie_auth:
-            self.session.headers.update(
-                {"cookie": "_simpleauth_sess={}".format(cookie_auth)}
-            )
+            if _looks_like_cookie_header(cookie_auth):
+                # A whole cookie header, name=value pairs and all, which
+                # is how a cookie other than _simpleauth_sess gets in
+                cookie_header = cookie_auth.strip()
+            else:
+                cookie_header = "_simpleauth_sess={}".format(cookie_auth)
+            self.session.headers.update({"cookie": cookie_header})
 
     def _can_write(self, path):
         """Actually write something, rather than ask about permissions.
@@ -912,12 +921,23 @@ class DownloadLibrary:
     def start(self):
         self._check_library_path()
 
+        if self.trove is True:
+            # Both trove endpoints answer 404 since the rebuild. The trove
+            # became the subscriber vault, which needs its own support
+            raise SiteError(
+                "The Humble Trove is gone from the rebuilt site (it became "
+                "the subscriber vault), so --trove cannot work any more"
+            )
+
         self.cache_file = os.path.join(self.library_path, ".cache.json")
         self.cache_data = self._load_cache_data(self.cache_file)
-        self.purchase_keys = (
-            self.purchase_keys if self.purchase_keys else self._get_purchase_keys()
-        )
-        self.purchase_keys = self._dedupe_keys(self.purchase_keys)
+        if self.purchase_keys:
+            self.purchase_keys = self._dedupe_keys(self.purchase_keys)
+
+        if self.site is None:
+            self.site = HumbleSite(self.session)
+        if self._signer is None:
+            self._signer = UrlSigner(self.site)
 
         previous_handler = self._install_interrupt_handler()
         try:
@@ -927,21 +947,14 @@ class DownloadLibrary:
             try:
                 self._start_workers()
 
-                if self.trove is True:
-                    logger.info("Only checking the Humble Trove...")
-                    self._current_bundle = "Humble Trove"
-                    for product in self._get_trove_products():
-                        if self._stop.is_set():
-                            break
-                        title = _clean_name(product["human-name"])
-                        self._process_trove_product(title, product)
-                else:
-                    for order_id in self.purchase_keys:
-                        if self._stop.is_set():
-                            # Interrupted, or something a worker found
-                            # that the rest of the run would hit too
-                            break
-                        self._process_order_id(order_id)
+                for order_id, order in self.site.orders(
+                    keys=self.purchase_keys or None
+                ):
+                    if self._stop.is_set():
+                        # Interrupted, or something a worker found that
+                        # the rest of the run would hit too
+                        break
+                    self._process_order(order_id, order)
 
                 # Everything is queued, so the totals have a real
                 # denominator now and can show a bar
@@ -949,12 +962,20 @@ class DownloadLibrary:
 
                 self._stop_workers()
 
+                if isinstance(self._fatal, Exception):
+                    raise self._fatal
                 if self._fatal:
                     raise LibraryPathError(self._fatal)
 
                 if self._stop.is_set():
                     # A sequential transfer was interrupted
                     sys.exit(INTERRUPT_EXIT_CODE)
+            except SiteError:
+                # Reading the library failed partway, usually an expired
+                # cookie. Downloads in flight get to finish their chunk
+                self._stop.set()
+                self._stop_workers(timeout=self.shutdown_grace)
+                raise
             except KeyboardInterrupt:
                 self._stop.set()
                 # Bounded: transfers check the stop flag between chunks,
@@ -968,6 +989,13 @@ class DownloadLibrary:
 
         if self.dry_run is True:
             self._log_dry_run_summary()
+
+        if self.adopted_count:
+            logger.info(
+                "{count} file(s) were already on disk at the right size and "
+                "were recorded in the cache rather than downloaded "
+                "again".format(count=self.adopted_count)
+            )
 
         if self._throttled_count:
             logger.warning(
@@ -1211,178 +1239,10 @@ class DownloadLibrary:
         session.cookies.update(self.session.cookies)
         return session
 
-    def _get_trove_download_url(self, machine_name, web_name):
-        try:
-            sign_r = self.session.post(
-                "https://www.humblebundle.com/api/v1/user/download/sign",
-                data={
-                    "machine_name": machine_name,
-                    "filename": web_name,
-                },
-            )
-        except Exception:
-            logger.error(
-                "Failed to get download url for trove product {title}".format(
-                    title=web_name
-                )
-            )
-            return None
-
-        logger.debug("Signed url response {sign_r}".format(sign_r=sign_r))
-        if sign_r.json().get("_errors") == "Unauthorized":
-            logger.critical("Your account does not have access to the Trove")
-            sys.exit()
-        signed_url = sign_r.json()["signed_url"]
-        logger.debug("Signed url {signed_url}".format(signed_url=signed_url))
-        return signed_url
-
-    def _process_trove_product(self, title, product):
-        for platform, download in product["downloads"].items():
-            # Sometimes the name has a dir in it
-            # Example is "Broken Sword 5 - the Serpent's Curse"
-            # Only the windows file has a dir like
-            # "revolutionsoftware/BS5_v2.2.1-win32.zip"
-            if self._should_download_platform(platform) is False:
-                self._log_skip(
-                    "Skipping {platform} for {product_title}".format(
-                        platform=platform, product_title=title
-                    )
-                )
-                continue
-
-            web_name = download["url"]["web"].split("/")[-1]
-            if self._should_download_file_by_ext_and_log(web_name) is False:
-                continue
-
-            cache_file_key = "trove:{name}".format(name=web_name)
-            file_info = {
-                "uploaded_at": (
-                    download.get("uploaded_at")
-                    or download.get("timestamp")
-                    or product.get("date_added", "0")
-                ),
-                "md5": download.get("md5", "UNKNOWN_MD5"),
-            }
-            cache_file_info = self.cache_data.get(cache_file_key, {})
-
-            if cache_file_info != {} and self.update is not True:
-                # Do not care about checking for updates at this time
-                continue
-
-            if file_info["uploaded_at"] != cache_file_info.get(
-                "uploaded_at"
-            ) and file_info["md5"] != cache_file_info.get("md5"):
-                if self.dry_run is True:
-                    # The trove api hands us the size up front, so only pay
-                    # for the signing request when the url is being printed
-                    signed_url = None
-                    if self.print_urls is True:
-                        signed_url = self._get_trove_download_url(
-                            download["machine_name"],
-                            web_name,
-                        )
-                    self._record_pending_download(
-                        signed_url,
-                        os.path.join("Humble Trove", title, web_name),
-                        _coerce_size(
-                            download.get("file_size") or download.get("size")
-                        ),
-                    )
-                    continue
-
-                product_folder = os.path.join(self.library_path, "Humble Trove", title)
-                # Create directory to save the files to
-                try:
-                    os.makedirs(product_folder)
-                except OSError:
-                    pass
-                local_filename = os.path.join(
-                    product_folder,
-                    web_name,
-                )
-                signed_url = self._get_trove_download_url(
-                    download["machine_name"],
-                    web_name,
-                )
-                if signed_url is None:
-                    # Failed to get signed url. Error logged in fn
-                    continue
-
-                try:
-                    product_r = self.session.get(signed_url, stream=True)
-                except Exception:
-                    logger.error(
-                        "Failed to get trove product {title}".format(title=web_name)
-                    )
-                    continue
-
-                uploaded_at = _trove_stamp(cache_file_info.get("uploaded_at"))
-
-                self._process_download(
-                    product_r,
-                    cache_file_key,
-                    file_info,
-                    local_filename,
-                    rename_str=uploaded_at,
-                    remote_file=signed_url,
-                    hashes=_struct_hashes(download),
-                )
-
-    def _get_trove_products(self):
-        trove_products = []
-        idx = 0
-        trove_base_url = "https://www.humblebundle.com/client/catalog?index={idx}"
-        while True:
-            logger.debug(
-                "Collecting trove product data from api pg:{idx} ...".format(idx=idx)
-            )
-            trove_page_url = trove_base_url.format(idx=idx)
-            try:
-                trove_r = self.session.get(trove_page_url)
-            except Exception:
-                logger.error("Failed to get products from Humble Trove")
-                return []
-
-            page_content = trove_r.json()
-
-            if len(page_content) == 0:
-                break
-
-            trove_products.extend(page_content)
-            idx += 1
-
-        return trove_products
-
-    def _process_order_id(self, order_id):
-        order_url = "https://www.humblebundle.com/api/v1/order/{order_id}?all_tpkds=true".format(
-            order_id=order_id
-        )
-        try:
-            order_r = self.session.get(
-                order_url,
-                headers={
-                    "content-type": "application/json",
-                    "content-encoding": "gzip",
-                },
-            )
-        except Exception:
-            logger.error("Failed to get order key {order_id}".format(order_id=order_id))
-            return
-
-        logger.debug("Order request: {order_r}".format(order_r=order_r))
-
-        try:
-            order = order_r.json()
-        except ValueError:
-            self._skip_order(
-                order_id,
-                order_r,
-                "the response was not json (is the cookie still valid?)",
-            )
-            return
-
+    def _process_order(self, order_id, order):
+        """Queue everything in one bundle, given in the old api's shape"""
         if not isinstance(order, dict) or "product" not in order:
-            self._skip_order(order_id, order_r, _order_error(order))
+            self._skip_order(order_id, _order_error(order))
             return
 
         bundle_title = _clean_name(order["product"]["human_name"])
@@ -1391,14 +1251,12 @@ class DownloadLibrary:
         for product in order.get("subproducts", []):
             self._process_product(order_id, bundle_title, product)
 
-    def _skip_order(self, order_id, order_r, reason):
+    def _skip_order(self, order_id, reason):
         """One unusable order must not take the whole run down with it"""
         self.skipped_orders.append(order_id)
         logger.error(
-            "Skipping order {order_id} (http {status_code}): {reason}".format(
-                order_id=order_id,
-                status_code=order_r.status_code,
-                reason=reason,
+            "Skipping order {order_id}: {reason}".format(
+                order_id=order_id, reason=reason
             )
         )
 
@@ -1511,6 +1369,17 @@ class DownloadLibrary:
                         url = file_type["url"]["web"]
 
                         url_filename = url.split("?")[0].split("/")[-1]
+
+                        signing = file_type.get("hbd_sign")
+                        if signing:
+                            # The site gives a filename, not a url. One is
+                            # minted in the worker, right before it is used
+                            url = SignedUrl(
+                                self._signer,
+                                signing["entitlement"],
+                                signing["download_key"],
+                                url_filename,
+                            )
 
                         if (
                             self._should_download_file_by_ext_and_log(url_filename)
@@ -1701,6 +1570,11 @@ class DownloadLibrary:
 
     def _log_url(self, url):
         if self.print_urls is True and url:
+            if isinstance(url, SignedUrl):
+                # Asking for the list is asking for these to be signed
+                url = self._resolve_signed(url)
+                if url is None:
+                    return
             # Straight to stdout, one per line, so the list stays usable
             # when piped into another tool. All logging goes to stderr
             print(url)
@@ -1752,7 +1626,7 @@ class DownloadLibrary:
             {
                 "bundle": self._current_bundle,
                 "local_file": local_file,
-                "url": remote_file,
+                "url": str(remote_file),
                 "file_size": file_size,
             }
         )
@@ -1878,6 +1752,11 @@ class DownloadLibrary:
             raise FileExistsError
 
         local_file = os.path.join(local_folder, local_filename)
+
+        if cache_file_info == {} and self._adopt(
+            cache_file_key, local_file, file_size
+        ):
+            raise FileExistsError
         if not self._claim(local_file):
             logger.debug(
                 "Already handled {local_file} this run".format(
@@ -1913,6 +1792,36 @@ class DownloadLibrary:
             return False
 
         return self._run_download_job(job)
+
+    def _adopt(self, cache_file_key, local_file, file_size):
+        """Take a file already on disk as downloaded, when the cache has
+        never heard of it but it is exactly the size it should be.
+
+        The rebuilt site identifies bundles by new ids, so after it no
+        old cache entry matches anything and a whole library would be
+        downloaded again. Size is the check rather than a checksum: the
+        old cache trusted its entries without one, and hashing a large
+        library on a slow drive costs hours.
+
+        The entry records no Last-Modified, since none was seen. The
+        first --update to reach it fills that in rather than treating
+        the mismatch as a change, so later updates compare like for like
+        """
+        if not file_size:
+            return False
+        try:
+            if os.path.getsize(local_file) != file_size:
+                return False
+        except OSError:
+            return False
+
+        self.adopted_count += 1
+        logger.debug(
+            "Already have {local_file}, recording it".format(local_file=local_file)
+        )
+        if self.dry_run is not True:
+            self._update_cache_data(cache_file_key, {"adopted": True})
+        return True
 
     def _claim(self, local_file):
         """First caller to ask for a destination gets it.
@@ -1997,8 +1906,53 @@ class DownloadLibrary:
         """Send a request, waiting out any pool wide cooldown first and
         treating a 429 as everyone's problem rather than this caller's.
 
-        The GET that streams a file and the HEAD that sizes one had the
-        same loop twice over, differing only in the verb and in how
+        url may be a SignedUrl, signed here, at the last moment. Humble
+        keeps handing out the same signed url until it lapses, so one
+        that is refused is signed again, once, and tried again
+        """
+        if not isinstance(url, SignedUrl):
+            return self._send_with_backoff(method, url, quiet=quiet, **kwargs)
+
+        resolved = self._resolve_signed(url)
+        if resolved is None:
+            return None
+        response = self._send_with_backoff(method, resolved, quiet=quiet, **kwargs)
+        if response is None or response.status_code not in (401, 403):
+            return response
+
+        try:
+            response.close()
+        except Exception:
+            pass
+        logger.debug(
+            "The download url for {name} was refused, signing a fresh "
+            "one".format(name=url.filename)
+        )
+        resolved = self._resolve_signed(url, refresh=True)
+        if resolved is None:
+            return None
+        return self._send_with_backoff(method, resolved, quiet=quiet, **kwargs)
+
+    def _resolve_signed(self, url, refresh=False):
+        """A real url for a SignedUrl, or None when there is not one"""
+        try:
+            return url.resolve(session=self._session(), refresh=refresh)
+        except NotSignedIn as error:
+            # Every remaining file would get the same answer
+            if not self._fatal:
+                self._fatal = error
+            self._stop.set()
+        except Exception as error:
+            logger.error(
+                "Could not get a download url for {name}: {error}".format(
+                    name=url.filename, error=error
+                )
+            )
+        return None
+
+    def _send_with_backoff(self, method, url, quiet=False, **kwargs):
+        """The GET that streams a file and the HEAD that sizes one had
+        the same loop twice over, differing only in the verb and in how
         loudly they complain when it does not work.
         """
         for _ in range(self.retries + 1):
@@ -2070,6 +2024,20 @@ class DownloadLibrary:
             if file_info["url_last_modified"] == cache_file_info.get(
                 "url_last_modified"
             ):
+                self._note_skip()
+                return False
+            if cache_file_info.get("adopted") and not cache_file_info.get(
+                "url_last_modified"
+            ):
+                # Found on disk with no date to compare against. Take
+                # this one as the baseline instead of calling it a change
+                try:
+                    remote_file_r.close()
+                except Exception:
+                    pass
+                self._update_cache_data(
+                    cache_file_key, dict(cache_file_info, **file_info)
+                )
                 self._note_skip()
                 return False
         if "url_last_modified" in cache_file_info:
@@ -2564,23 +2532,6 @@ class DownloadLibrary:
                 name=os.path.basename(cache_file), reason=reason, kept=kept
             )
         )
-
-    def _get_purchase_keys(self):
-        try:
-            library_r = self.session.get("https://www.humblebundle.com/home/library")
-        except Exception:
-            logger.exception("Failed to get list of purchases")
-            return []
-
-        logger.debug("Library request: " + str(library_r))
-        library_page = parsel.Selector(text=library_r.text)
-        user_data = (
-            library_page.css("#user-home-json-data").xpath("string()").extract_first()
-        )
-        if user_data is None:
-            raise Exception("Unable to download user-data, cookies missing?")
-        orders_json = json.loads(user_data)
-        return orders_json["gamekeys"]
 
     def _should_download_platform(self, platform):
         platform = platform.lower()

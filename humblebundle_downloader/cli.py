@@ -34,7 +34,10 @@ def parse_args(args):
         "-s",
         "--session-auth",
         type=str,
-        help="Value of the cookie _simpleauth_sess. WRAP IN QUOTES",
+        help=(
+            "Value of the _simpleauth_sess cookie, or a whole cookie header "
+            "(name=value; name2=value2) for a different cookie. WRAP IN QUOTES"
+        ),
     )
     parser.add_argument(
         "-l",
@@ -47,7 +50,10 @@ def parse_args(args):
         "-t",
         "--trove",
         action="store_true",
-        help="Only check and download Humble Trove content",
+        help=(
+            "No longer works: the Humble Trove was removed from the site "
+            "and replaced by the subscriber vault"
+        ),
     )
     parser.add_argument(
         "-u",
@@ -182,8 +188,8 @@ def parse_args(args):
         type=str,
         nargs="*",
         help=(
-            "The purchase download key. Find in the url on the "
-            "products/bundle download page. Can set multiple"
+            "Only these bundles, by the id at the end of the bundle's "
+            "library page url (/home/library/<id>). Can set multiple"
         ),
     )
 
@@ -212,6 +218,7 @@ def cli():
     jobs = resolve_jobs(cli_args)
 
     from .download_library import DownloadLibrary, LibraryPathError
+    from .humble_site import SiteError
 
     try:
         DownloadLibrary(
@@ -235,7 +242,7 @@ def cli():
             shutdown_grace=cli_args.exit_timeout,
             log_skipped=not cli_args.hide_skipped,
         ).start()
-    except LibraryPathError as error:
+    except (LibraryPathError, SiteError) as error:
         # Nothing to retry and nothing to show a traceback for: the
-        # path is wrong, and the message says how
+        # path is wrong, or the site said no, and the message says how
         sys.exit(str(error))
