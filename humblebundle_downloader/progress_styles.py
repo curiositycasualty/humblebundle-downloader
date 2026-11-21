@@ -23,6 +23,9 @@ PROGRESS_STYLES = {
     "bars": {"muncher": ("#",), "pellet": "-", "wake": "#"},
     # Solid blocks, for terminals with a good font
     "blocks": {"muncher": ("█",), "pellet": "░", "wake": "█"},
+    # A light cycle racing across the grid, its rider tucking in and
+    # out, leaving a solid wall of light behind it
+    "cycle": {"muncher": ("O='`o", "O=`'o"), "pellet": "·", "wake": "━"},
     # A little train running along the rails into a tunnel at the end,
     # couplings stretching and bunching as it chuffs along. With this
     # style the totals get the full sized train from sl, on its own

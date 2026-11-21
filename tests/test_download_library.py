@@ -1690,3 +1690,11 @@ def test_the_cli_offers_the_train(capsys):
     args = parse_args(["-l", "x", "-s", "y", "--progress-style", "train",
                        "--train-per-download"])
     assert args.train_per_download is True
+
+
+def test_the_light_cycle_leaves_a_wall_of_light():
+    style = PROGRESS_STYLES["cycle"]
+    assert _muncher_bar(0.0, 20, style, 0) == "[O='`o" + "·" * 15 + "]"
+    assert _muncher_bar(1.0, 20, style, 1) == "[" + "━" * 15 + "O=`'o]"
+    middle = _muncher_bar(0.5, 20, style, 0)
+    assert middle.index("O") == 1 + middle.count("━")

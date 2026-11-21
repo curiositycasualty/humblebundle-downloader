@@ -3,6 +3,7 @@
 
 ## Unreleased
 
+- Added a `cycle` progress style: a light cycle racing across the grid, leaving a wall of light behind it
 - A second Ctrl+C now always quits, even with downloads in flight. It used to be handled in
   Python, which meant waiting for the main thread and taking the terminal lock first; with the
   progress display up, a thread holding that lock could keep either press from getting through.
