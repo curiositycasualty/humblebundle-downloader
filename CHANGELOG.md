@@ -3,6 +3,9 @@
 
 ## Unreleased
 
+- Styles that leave the bar at 100% now also enter it: at 0% the track is empty, and from 1% the
+  front of the train, bike, fish and so on comes in from the left. The arrow flies in too; the mouse
+  and worm set out from the start of the bar as before
 - Added nine progress styles: `rocket`, `runner`, `duck`, `car`, `comet` and `ufo`, which leave the bar
   as the file completes, and `mouse`, `arrow` and `worm`, which arrive at the cheese, the target and
   the apple at the end of it

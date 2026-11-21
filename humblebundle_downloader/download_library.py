@@ -237,20 +237,21 @@ def _muncher_bar(fraction, width, style, frame):
         behind = style["pellet"] * position
         return "[" + behind + muncher + ahead + end + "]"
 
-    if style.get("exits"):
-        # Rides off the end instead of stopping at it: by 100% it has
-        # gone, leaving only what it left behind
-        position = int(round(max(0.0, min(1.0, fraction)) * width))
-        track = style["wake"] * position + muncher + style["pellet"] * width
-        return "[" + track[:width] + end + "]"
+    # Where the muncher's nose... its first column, rather, can be. A
+    # style that enters starts wholly off the left of the track, and one
+    # that exits finishes wholly off the right; the rest start and stop
+    # inside it. Whatever is outside the track is not drawn
+    fraction = max(0.0, min(1.0, fraction))
+    first = -len(muncher) if style.get("enters") else 0
+    last = width if style.get("exits") else span
+    position = first + int(round(fraction * (last - first)))
+    if style.get("enters") and fraction > 0:
+        # Under way means in sight, however little of the way
+        position = max(position, first + 1)
 
-    position = int(round(max(0.0, min(1.0, fraction)) * span))
-    return "[{wake}{muncher}{pellets}{end}]".format(
-        wake=style["wake"] * position,
-        muncher=muncher,
-        pellets=style["pellet"] * (span - position),
-        end=end,
-    )
+    shown = muncher[max(0, -position):]
+    track = style["wake"] * max(0, position) + shown + style["pellet"] * width
+    return "[" + track[:width] + end + "]"
 
 
 def _fit(text, width):

@@ -160,7 +160,8 @@ forth instead of a percentage. Slots are stable, so a finished transfer leaves i
 the next one rather than making the other lines jump about. The totals line counts files rather
 than bytes, and only grows a bar once everything has been queued and the denominator is final.
 
-`--progress-style` picks the muncher. Most travel along the bar and leave it as the file completes:
+`--progress-style` picks the muncher. Most come in from the left as the file starts and leave on the
+right as it completes:
 `fish` (the default), `snail`, `cycle`, `train` (into a tunnel), `rocket`, `runner`, `duck`, `car`,
 `comet` and `ufo`. A few travel to something at the end and arrive as it completes: `mouse` (to the
 cheese), `arrow` (into the target) and `worm` (to the apple). `bars` and `blocks` just fill. They live

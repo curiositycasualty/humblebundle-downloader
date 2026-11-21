@@ -1671,10 +1671,12 @@ def test_the_train_runs_along_the_rails_into_a_tunnel():
     start = _muncher_bar(0.0, 20, style, 0)
     middle = _muncher_bar(0.5, 20, style, 1)
     end = _muncher_bar(1.0, 20, style, 0)
-    assert start == "[[]=[]=[]>" + "═" * 9 + "▐▓]"
-    assert middle == "[" + "═" * 9 + "[]-[]-[]>▐▓]"
+    # Not yet in view, then nose first out of the left
+    assert start == "[" + "═" * 18 + "▐▓]"
+    assert _muncher_bar(0.01, 20, style, 0) == "[>" + "═" * 17 + "▐▓]"
+    assert middle == "[" + "═" * 5 + "[]-[]-[]>" + "═" * 4 + "▐▓]"
     # Gone into the tunnel, car by car
-    assert _muncher_bar(0.9, 20, style, 0) == "[" + "═" * 16 + "[]▐▓]"
+    assert _muncher_bar(0.9, 20, style, 0) == "[" + "═" * 15 + "[]=▐▓]"
     assert end == "[" + "═" * 18 + "▐▓]"
     assert len({len(start), len(middle), len(end)}) == 1
 
@@ -1697,15 +1699,16 @@ def test_the_cli_offers_the_train(capsys):
 
 def test_the_light_cycle_leaves_a_wall_of_light():
     style = PROGRESS_STYLES["cycle"]
-    assert _muncher_bar(0.0, 20, style, 0) == "[O='`o" + "·" * 15 + "]"
+    assert _muncher_bar(0.0, 20, style, 0) == "[" + "·" * 20 + "]"
+    assert _muncher_bar(0.01, 20, style, 0) == "[o" + "·" * 19 + "]"
     middle = _muncher_bar(0.5, 20, style, 0)
-    assert middle == "[" + "━" * 10 + "O='`o" + "·" * 5 + "]"
+    assert middle == "[" + "━" * 7 + "O='`o" + "·" * 8 + "]"
 
 
 def test_the_light_cycle_rides_off_the_end_at_100():
     style = PROGRESS_STYLES["cycle"]
-    leaving = _muncher_bar(0.9, 20, style, 0)
-    assert leaving == "[" + "━" * 18 + "O=]"
+    leaving = _muncher_bar(0.95, 20, style, 0)
+    assert leaving == "[" + "━" * 19 + "O]"
     assert _muncher_bar(1.0, 20, style, 1) == "[" + "━" * 20 + "]"
     widths = {len(_muncher_bar(f / 20, 20, style, f)) for f in range(21)}
     assert widths == {22}
@@ -1739,7 +1742,33 @@ def test_travellers_leave_the_bar_at_100(name):
     end = style.get("end", "")
     done = _muncher_bar(1.0, 20, style, 0)
     assert done == "[" + style["wake"] * (20 - len(end)) + end + "]"
-    assert style["muncher"][0] in _muncher_bar(0.0, 20, style, 0)
+
+
+ENTERS = sorted(n for n, s in PROGRESS_STYLES.items() if s.get("enters"))
+
+
+def test_everything_that_crosses_the_bar_enters_it_too():
+    assert set(EXITS) <= set(ENTERS)
+    assert "arrow" in ENTERS
+    assert not {"mouse", "worm", "bars", "blocks"} & set(ENTERS)
+
+
+@pytest.mark.parametrize("name", ENTERS)
+def test_entering_styles_start_out_of_sight_and_peek_in_at_1(name):
+    style = PROGRESS_STYLES[name]
+    end = style.get("end", "")
+    track = 20 - len(end)
+    assert _muncher_bar(0.0, 20, style, 0) == "[" + style["pellet"] * track + end + "]"
+    nose = style["muncher"][0][-1]
+    assert _muncher_bar(0.01, 20, style, 0) == (
+        "[" + nose + style["pellet"] * (track - 1) + end + "]"
+    )
+
+
+@pytest.mark.parametrize("name", sorted(set(PROGRESS_STYLES) - set(ENTERS)))
+def test_everything_else_is_there_from_the_start(name):
+    style = PROGRESS_STYLES[name]
+    assert _muncher_bar(0.0, 20, style, 0).startswith("[" + style["muncher"][0])
 
 
 @pytest.mark.parametrize("name", ARRIVALS)
@@ -1747,8 +1776,6 @@ def test_arrivals_end_up_at_whatever_is_at_the_end(name):
     style = PROGRESS_STYLES[name]
     done = _muncher_bar(1.0, 20, style, 0)
     assert done.endswith(style["muncher"][0] + style["end"] + "]")
-    start = _muncher_bar(0.0, 20, style, 0)
-    assert start.startswith("[" + style["muncher"][0])
 
 
 @pytest.mark.parametrize("name", PLAIN)
