@@ -3,6 +3,13 @@
 
 ## 0.5.0
 
+- Files Humble now sends much smaller than the one on disk (under 75% of its size) no longer replace
+  it: Humble regenerated most of its catalogue in November 2026, and many files came out far more
+  compressed, with the originals no longer offered anywhere, torrents included. A run keeps such a
+  file rather than downloading over it, even when it matches nothing in the listing, and `--update`
+  keeps it rather than demoting it to a dated copy. `--accept-smaller` turns this off. Affected
+  files, and new downloads much smaller than their listing, are named at the end of the run and
+  kept in `.hbd-smaller-than-listed.tsv` in the library
 - The worm now eats the apple at the end, as the mouse does the cheese
 - Fixed `--update` crashing on a changed file with no extension, and on a path with a dot in a
   folder name, when keeping the previous version beside the new one

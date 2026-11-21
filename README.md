@@ -287,6 +287,21 @@ match is damaged, and is retried as above. The same goes for files already on di
 one at a different size from the listing is recognised if the server says that is its size now.
 Because sizes come from the listing, `--dry-run` totals can be a little out for replaced files.
 
+Not all of those replacements are improvements. Humble regenerated most of its files in November
+2026, and many came out far smaller: in one comic bundle, 45 of 89 PDFs shrank to under three
+quarters of their listed size, most to the size of the CBZ of the same book, which suggests the same,
+more compressed, page images. The originals are no longer offered, torrents included, so the
+downloader protects any you already have:
+
+- a file on disk much bigger than what Humble now sends (the new one under 75% of its size) is kept
+  rather than downloaded over, even when it matches nothing in the listing
+- `--update` will not put a much smaller new version in place of the file you have; it records the
+  new version's date and leaves yours alone
+
+`--accept-smaller` turns both off. Every file affected either way, and every newly downloaded file
+that arrived much smaller than its listing, is named at the end of the run and kept in a running
+list, `.hbd-smaller-than-listed.tsv` in the library, with both sizes and the date.
+
 `--print-checksums` prints the sha1 Humble lists for every file a run would download, to stdout,
 in the format `shasum -c` reads, with paths relative to the library. It works with `--dry-run`:
 

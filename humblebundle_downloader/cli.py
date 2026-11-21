@@ -179,6 +179,15 @@ def parse_args(args):
         ),
     )
     parser.add_argument(
+        "--accept-smaller",
+        action="store_true",
+        help=(
+            "Let a new version much smaller than the file on disk (under "
+            "75%%) replace it. By default the file on disk is kept, since "
+            "Humble's regenerated files are often more heavily compressed"
+        ),
+    )
+    parser.add_argument(
         "--print-checksums",
         action="store_true",
         help=(
@@ -279,6 +288,7 @@ def cli():
             dry_run=cli_args.dry_run,
             print_urls=cli_args.print_urls,
             print_checksums=cli_args.print_checksums,
+            accept_smaller=cli_args.accept_smaller,
             progress_style=cli_args.progress_style,
             train_per_download=cli_args.train_per_download,
             jobs=jobs,

@@ -35,6 +35,11 @@ DEFAULT_COOLDOWN = 30
 
 # Conventional exit status for "killed by SIGINT"
 INTERRUPT_EXIT_CODE = 130
+# Below this fraction of the size it replaces, or of the size Humble
+# lists, a file counts as much smaller: likely more heavily compressed
+SMALLER_RATIO = 0.75
+# In the library, the running list of such files
+SMALLER_REPORT = ".hbd-smaller-than-listed.tsv"
 # Exit status for a run that finished but gave up on some files
 FAILED_EXIT_CODE = 1
 # How many of those the end of the run names, before "and N more"
@@ -105,6 +110,12 @@ def _digest_of(algorithm, hasher):
     if hasher is None or algorithm is None:
         return {}
     return {algorithm: hasher.hexdigest()}
+
+
+def _much_smaller(new, old):
+    """Whether new is so much smaller than old that it is likely a
+    lesser copy of the same thing rather than the same thing"""
+    return bool(new and old) and new < SMALLER_RATIO * old
 
 
 def _resume_note(part_file):
@@ -991,6 +1002,7 @@ class DownloadLibrary:
         dry_run=False,
         print_urls=False,
         print_checksums=False,
+        accept_smaller=False,
         jobs=1,
         retries=5,
         verify=True,
@@ -1097,6 +1109,11 @@ class DownloadLibrary:
         self.dry_run = dry_run
         self.print_urls = print_urls
         self.print_checksums = print_checksums
+        # Whether a much smaller new version may replace a file on disk
+        self.accept_smaller = accept_smaller
+        # (path, size before, size now, "downloaded" or "kept") for every
+        # file much smaller than it was, for the end of the run
+        self.smaller_files = []
         self._checksum_header_done = False
 
         # Tally of everything a real run would fetch, filled in by
@@ -1302,6 +1319,8 @@ class DownloadLibrary:
                         more=len(self.failed_files) - FAILURES_LISTED
                     )
                 )
+
+        self._report_smaller()
 
         if self.stale_listings:
             logger.warning(
@@ -2270,6 +2289,7 @@ class DownloadLibrary:
         """
         if not file_size:
             return False
+        kept = None
         try:
             on_disk = os.path.getsize(local_file)
         except OSError:
@@ -2283,7 +2303,14 @@ class DownloadLibrary:
             headers = self._get_remote_headers(remote_file)
             served = _coerce_size((headers or {}).get("Content-Length"))
             if served != on_disk:
-                return False
+                if not (served and _much_smaller(served, on_disk)) or self.accept_smaller:
+                    return False
+                # What is on disk is far bigger than what Humble sends now,
+                # which since its files were regenerated usually means a
+                # more heavily compressed one. Downloading would overwrite
+                # the original with no copy kept
+                kept = served
+                self._keep_larger(local_file, on_disk, served)
 
         self.adopted_count += 1
         logger.debug(
@@ -2294,7 +2321,10 @@ class DownloadLibrary:
             _remove_quietly(local_file + ".part")
             _remove_quietly(_resume_note(local_file + ".part"))
         if self.dry_run is not True:
-            self._update_cache_data(cache_file_key, {"adopted": True})
+            entry = {"adopted": True}
+            if kept is not None:
+                entry["kept_larger"] = kept
+            self._update_cache_data(cache_file_key, entry)
         return True
 
     def _claim(self, local_file):
@@ -2542,12 +2572,35 @@ class DownloadLibrary:
                 )
                 self._note_skip()
                 return False
+        local_file = os.path.join(local_folder, local_filename)
+
+        if cache_file_info and not self.accept_smaller:
+            # An update that would put a much smaller file in place of
+            # the one on disk. The old one would only survive as a dated
+            # copy beside it, so keep it where it is instead
+            on_disk = _file_size(local_file)
+            if remote_file_r.status_code == 206:
+                served = _content_range_total(remote_file_r)
+            else:
+                served = _coerce_size(remote_file_r.headers.get("Content-Length"))
+            if on_disk and served and _much_smaller(served, on_disk):
+                try:
+                    remote_file_r.close()
+                except Exception:
+                    pass
+                self._keep_larger(local_file, on_disk, served)
+                self._update_cache_data(
+                    cache_file_key,
+                    dict(cache_file_info, kept_larger=served, **file_info),
+                )
+                self._note_skip()
+                return False
+
         if "url_last_modified" in cache_file_info:
             last_modified = self._cache_rename_date(cache_file_info)
         else:
             last_modified = None
 
-        local_file = os.path.join(local_folder, local_filename)
         # The library root going missing mid run usually means a drive
         # was unmounted. makedirs below would cheerfully rebuild the
         # tree inside the empty mountpoint and fill the boot disk
@@ -2872,6 +2925,75 @@ class DownloadLibrary:
         with self._notice_lock:
             self.failed_files.append((local_file, reason))
 
+    def _keep_larger(self, local_file, on_disk, served):
+        with self._notice_lock:
+            self.smaller_files.append((local_file, on_disk, served, "kept"))
+        logger.info(
+            "Keeping your {name} ({mine}): Humble now sends a much smaller "
+            "version ({theirs}). --accept-smaller takes it anyway".format(
+                name=os.path.basename(local_file),
+                mine=_human_size(on_disk),
+                theirs=_human_size(served),
+            )
+        )
+
+    def _report_smaller(self):
+        """Say which files are much smaller than they were, and keep a
+        running list in the library, one line per file, newest wins"""
+        if not self.smaller_files:
+            return
+        downloaded = [f for f in self.smaller_files if f[3] == "downloaded"]
+        kept = [f for f in self.smaller_files if f[3] == "kept"]
+        if downloaded:
+            logger.warning(
+                "{count} file(s) arrived much smaller than Humble lists "
+                "({before} listed, {after} received), likely more heavily "
+                "compressed than the originals".format(
+                    count=len(downloaded),
+                    before=_human_size(sum(f[1] for f in downloaded)),
+                    after=_human_size(sum(f[2] for f in downloaded)),
+                )
+            )
+        if kept:
+            logger.info(
+                "{count} file(s) of yours were kept rather than replaced by "
+                "much smaller versions ({mine} kept, {theirs} on offer)".format(
+                    count=len(kept),
+                    mine=_human_size(sum(f[1] for f in kept)),
+                    theirs=_human_size(sum(f[2] for f in kept)),
+                )
+            )
+        if self.dry_run is True:
+            return
+        report = os.path.join(self.library_path, SMALLER_REPORT)
+        rows = {}
+        try:
+            with open(report) as handle:
+                for line in handle:
+                    if line.startswith("#") or not line.strip():
+                        continue
+                    rows[line.split("\t", 1)[0]] = line.rstrip("\n")
+        except OSError:
+            pass
+        today = datetime.date.today().isoformat()
+        for path, before, after, kind in self.smaller_files:
+            rel = os.path.relpath(path, self.library_path)
+            rows[rel] = "\t".join(
+                [rel, kind, str(before), str(after),
+                 "{0:.0f}%".format(100.0 * after / before), today]
+            )
+        try:
+            with open(report, "w") as handle:
+                handle.write(
+                    "# path\twhat happened\tsize before\tsize now\tnow as % "
+                    "of before\tdate\n"
+                )
+                for rel in sorted(rows):
+                    handle.write(rows[rel] + "\n")
+            logger.info("The list is in {0}".format(report))
+        except OSError as error:
+            logger.warning("Could not write {0}: {1}".format(report, error))
+
     def _listing_is_stale(self, label, part_file, listed_size):
         """Whether a checksum that does not match is Humble's listing
         being out of date rather than the download being damaged.
@@ -2887,6 +3009,10 @@ class DownloadLibrary:
             return False
         with self._notice_lock:
             self.stale_listings += 1
+            if _much_smaller(arrived, listed_size):
+                self.smaller_files.append(
+                    (part_file[: -len(".part")], listed_size, arrived, "downloaded")
+                )
         logger.warning(
             "{name} is not the version Humble lists ({listed}, the server "
             "sent {arrived}): keeping what the server sent, with its own "

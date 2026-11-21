@@ -781,3 +781,126 @@ def test_adopting_a_file_clears_what_an_earlier_run_left(tmp_path):
     (folder / "big.zip.part.json").write_text('{"validator": "x"}')
     library(tmp_path, FakeHumble(*one_big_file(), bodies={"big.zip": BIG}), jobs=1).start()
     assert sorted(p.name for p in folder.iterdir()) == ["big.zip"]
+
+
+###
+# much smaller than before
+###
+ORIGINAL = b"the original, far less compressed " * 60      # 2,040 bytes
+
+
+def game_on_disk(tmp_path, body=ORIGINAL):
+    have = tmp_path / "lib" / "Bundle Two" / "Game" / "game.exe"
+    have.parent.mkdir(parents=True, exist_ok=True)
+    have.write_bytes(body)
+    return have
+
+
+def report_rows(tmp_path):
+    path = tmp_path / "lib" / ".hbd-smaller-than-listed.tsv"
+    if not path.exists():
+        return None
+    return [l.split("\t") for l in path.read_text().splitlines() if not l.startswith("#")]
+
+
+def test_an_original_on_disk_is_not_overwritten_by_a_much_smaller_file(tmp_path, caplog):
+    import logging
+
+    caplog.set_level(logging.INFO)
+    have = game_on_disk(tmp_path)
+    fake = FakeHumble(*two_bundles())
+    dl = library(tmp_path, fake, jobs=1, purchase_keys=["b2"])
+    dl.start()
+    assert have.read_bytes() == ORIGINAL
+    assert "game.exe" not in fake.streamed
+    assert cache_of(tmp_path)["b2:game.exe"] == {"adopted": True, "kept_larger": len(BODIES["game.exe"])}
+    assert "Keeping your game.exe" in caplog.text
+    rows = report_rows(tmp_path)
+    assert rows == [[os.path.join("Bundle Two", "Game", "game.exe"), "kept",
+                     str(len(ORIGINAL)), str(len(BODIES["game.exe"])), "29%", rows[0][5]]]
+
+
+def test_accept_smaller_takes_the_new_file(tmp_path):
+    have = game_on_disk(tmp_path)
+    fake = FakeHumble(*two_bundles())
+    library(tmp_path, fake, jobs=1, purchase_keys=["b2"], accept_smaller=True).start()
+    assert have.read_bytes() == BODIES["game.exe"]
+
+
+def test_update_keeps_the_original_when_the_new_version_is_much_smaller(tmp_path):
+    fake = FakeHumble(*two_bundles())
+    library(tmp_path, fake, jobs=1, purchase_keys=["b2"]).start()
+    have = tmp_path / "lib" / "Bundle Two" / "Game" / "game.exe"
+    assert have.read_bytes() == BODIES["game.exe"]
+
+    # Humble regenerates it, much smaller
+    fake.bodies["game.exe"] = b"tiny"
+    fake.last_modified = "Mon, 02 Nov 2026 00:00:00 GMT"
+    streamed_before = list(fake.streamed)
+    library(tmp_path, fake, jobs=1, purchase_keys=["b2"], update=True).start()
+    assert have.read_bytes() == BODIES["game.exe"]
+    assert fake.streamed == streamed_before
+    entry = cache_of(tmp_path)["b2:game.exe"]
+    assert entry["url_last_modified"] == "Mon, 02 Nov 2026 00:00:00 GMT"
+    assert entry["kept_larger"] == 4
+    assert sorted(p.name for p in have.parent.iterdir()) == ["game.exe"]
+
+    # and the next update has nothing new to decide
+    gets = len(fake.cdn_gets)
+    dl = library(tmp_path, fake, jobs=1, purchase_keys=["b2"], update=True)
+    dl.start()
+    assert len(fake.cdn_gets) == gets + 1
+    assert dl.smaller_files == []
+
+
+def test_update_still_takes_a_new_version_that_is_not_much_smaller(tmp_path):
+    fake = FakeHumble(*two_bundles())
+    library(tmp_path, fake, jobs=1, purchase_keys=["b2"]).start()
+    fake.bodies["game.exe"] = BODIES["game.exe"] + b" with a patch"
+    fake.last_modified = "Mon, 02 Nov 2026 00:00:00 GMT"
+    library(tmp_path, fake, jobs=1, purchase_keys=["b2"], update=True).start()
+    folder = tmp_path / "lib" / "Bundle Two" / "Game"
+    assert (folder / "game.exe").read_bytes().endswith(b" with a patch")
+    assert len(list(folder.iterdir())) == 2      # the old one kept, dated, as ever
+
+
+def test_a_new_download_much_smaller_than_listed_is_reported(tmp_path, caplog):
+    import logging
+
+    caplog.set_level(logging.WARNING)
+    entries, pages = two_bundles()
+    fake = FakeHumble(entries, pages, bodies=dict(BODIES, **{"two.pdf": b"much less" * 10}))
+    dl = library(tmp_path, fake, jobs=1, purchase_keys=["b1"])
+    dl.start()
+    assert [(os.path.basename(p), kind) for p, _, _, kind in dl.smaller_files] == [("two.pdf", "downloaded")]
+    assert "1 file(s) arrived much smaller than Humble lists" in caplog.text
+    assert [r[0] for r in report_rows(tmp_path)] == [os.path.join("Bundle One", "Book Two", "two.pdf")]
+
+
+def test_the_report_keeps_one_line_per_file_across_runs(tmp_path):
+    for _ in range(2):
+        (tmp_path / "lib" / "Bundle Two" / "Game").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "lib" / ".cache.json").unlink(missing_ok=True)
+        game_on_disk(tmp_path)
+        library(tmp_path, FakeHumble(*two_bundles()), jobs=1, purchase_keys=["b2"]).start()
+    assert len(report_rows(tmp_path)) == 1
+
+
+def test_a_dry_run_reports_but_writes_no_list(tmp_path):
+    game_on_disk(tmp_path)
+    dl = library(tmp_path, FakeHumble(*two_bundles()), dry_run=True, purchase_keys=["b2"])
+    dl.start()
+    assert len(dl.smaller_files) == 1
+    assert report_rows(tmp_path) is None
+
+
+def test_a_new_version_only_a_little_smaller_is_taken_as_usual(tmp_path):
+    fake = FakeHumble(*two_bundles())
+    library(tmp_path, fake, jobs=1, purchase_keys=["b2"]).start()
+    slightly = BODIES["game.exe"][: int(len(BODIES["game.exe"]) * 0.9)]
+    fake.bodies["game.exe"] = slightly
+    fake.last_modified = "Mon, 02 Nov 2026 00:00:00 GMT"
+    dl = library(tmp_path, fake, jobs=1, purchase_keys=["b2"], update=True)
+    dl.start()
+    assert (tmp_path / "lib" / "Bundle Two" / "Game" / "game.exe").read_bytes() == slightly
+    assert dl.smaller_files == []
