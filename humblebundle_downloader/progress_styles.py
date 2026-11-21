@@ -8,7 +8,8 @@ the animation, one entry per frame, cycled as the display repaints;
 `pellet` is the track ahead of it and `wake` what it leaves behind.
 An optional `end` is drawn at the far end of the track, for the muncher
 to arrive at, `exits` has it carry on off the end so 100% is all wake,
-`enters` has it start off the left so 0% is all track, and `scene` names a full sized picture to draw as well
+`enters` has it start off the left so 0% is all track, `eaten` lists what
+is left of the end as the muncher eats it over the last tenth, and `scene` names a full sized picture to draw as well
 when there is room, which only the train has.
 
 Add your own. The only rule is that every frame of a style has to be
@@ -34,8 +35,15 @@ PROGRESS_STYLES = {
         "exits": True,
         "enters": True,
     },
-    # A mouse nibbling its way along the crumbs to the cheese
-    "mouse": {"muncher": ("~( 3:>", "~( 3;>"), "pellet": "·", "wake": " ", "end": "◣"},
+    # A mouse nibbling its way along the crumbs to the cheese, and then
+    # eating that too: what is left of it in "eaten", wedge to nothing
+    "mouse": {
+        "muncher": ("~( 3:>", "~( 3;>"),
+        "pellet": "·",
+        "wake": " ",
+        "end": "◣",
+        "eaten": ("◣", "▖", "·", " "),
+    },
     # An arrow in flight, which thunks into the target as the file lands
     "arrow": {"muncher": (">>--->", ">>--->"), "pellet": " ", "wake": " ", "end": "(◎)", "enters": True},
     # A worm wriggling along to the apple

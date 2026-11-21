@@ -3,6 +3,8 @@
 
 ## Unreleased
 
+- The mouse now reaches the cheese at 90% and eats it over the last tenth, until at 100% there is
+  none left
 - Styles that leave the bar at 100% now also enter it: at 0% the track is empty, and from 1% the
   front of the train, bike, fish and so on comes in from the left. The arrow flies in too; the mouse
   and worm set out from the start of the bar as before

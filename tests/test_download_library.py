@@ -1775,7 +1775,27 @@ def test_everything_else_is_there_from_the_start(name):
 def test_arrivals_end_up_at_whatever_is_at_the_end(name):
     style = PROGRESS_STYLES[name]
     done = _muncher_bar(1.0, 20, style, 0)
-    assert done.endswith(style["muncher"][0] + style["end"] + "]")
+    left = style.get("eaten", (style["end"],))[-1]
+    assert done.endswith(style["muncher"][0] + left + "]")
+
+
+def test_the_mouse_eats_the_cheese_down_to_nothing():
+    style = PROGRESS_STYLES["mouse"]
+    at = {f: _muncher_bar(f, 20, style, 0) for f in (0.5, 0.9, 0.95, 0.99, 1.0)}
+    mouse = style["muncher"][0]
+    assert at[0.5].endswith("◣]")
+    # There by 90%, still whole
+    assert at[0.9] == "[" + " " * 13 + mouse + "◣]"
+    assert at[0.95].endswith(mouse + "▖]")
+    assert at[0.99].endswith(mouse + "·]")
+    assert at[1.0] == "[" + " " * 13 + mouse + " ]"
+
+
+def test_eaten_stages_are_all_one_width():
+    for name, style in PROGRESS_STYLES.items():
+        stages = style.get("eaten")
+        if stages:
+            assert {len(stage) for stage in stages} == {len(style["end"])}, name
 
 
 @pytest.mark.parametrize("name", PLAIN)

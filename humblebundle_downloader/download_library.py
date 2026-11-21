@@ -212,6 +212,10 @@ def _bar(fraction, width):
     return "[" + "#" * filled + "-" * (width - filled) + "]"
 
 
+# How far along a style that eats what is at the end gets to it
+EAT_FROM = 0.9
+
+
 def _muncher_bar(fraction, width, style, frame):
     """A muncher eating its way along the track.
 
@@ -221,6 +225,18 @@ def _muncher_bar(fraction, width, style, frame):
     frames = style["muncher"]
     muncher = frames[frame % len(frames)]
     end = style.get("end", "")
+
+    # A style that eats what is at the end arrives at it a little early
+    # and spends the rest of the way eating it, a stage at a time
+    eaten = style.get("eaten")
+    if eaten and fraction is not None:
+        arrive = EAT_FROM
+        done = max(0.0, min(1.0, fraction))
+        if done > arrive:
+            bites = (done - arrive) / (1.0 - arrive)
+            end = eaten[min(len(eaten) - 1, int(bites * (len(eaten) - 1) + 1e-9))]
+        fraction = min(1.0, done / arrive)
+
     if len(end) + len(muncher) > width:
         end = ""
     width -= len(end)
@@ -237,10 +253,10 @@ def _muncher_bar(fraction, width, style, frame):
         behind = style["pellet"] * position
         return "[" + behind + muncher + ahead + end + "]"
 
-    # Where the muncher's nose... its first column, rather, can be. A
-    # style that enters starts wholly off the left of the track, and one
-    # that exits finishes wholly off the right; the rest start and stop
-    # inside it. Whatever is outside the track is not drawn
+    # Where the muncher's first column goes. A style that enters starts
+    # wholly off the left of the track, and one that exits finishes
+    # wholly off the right; the rest start and stop inside it. Whatever
+    # falls outside the track is not drawn
     fraction = max(0.0, min(1.0, fraction))
     first = -len(muncher) if style.get("enters") else 0
     last = width if style.get("exits") else span
