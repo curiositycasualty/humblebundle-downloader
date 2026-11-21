@@ -6,6 +6,7 @@ import pytest
 from humblebundle_downloader.humble_site import (
     LIST_ACTION,
     SIGN_ACTION,
+    VAULT_SIGN_ACTION,
     HumbleSite,
     NotSignedIn,
     SignedUrl,
@@ -23,6 +24,7 @@ SHA1 = "0123456789abcdef0123456789abcdef01234567"
 LIST_ID = "60" + "a" * 40
 SIGN_ID = "70" + "b" * 40
 OTHER_ID = "40" + "c" * 40
+VAULT_ID = "40" + "e" * 40
 
 
 def struct(web, size=100, name="PDF"):
@@ -217,6 +219,7 @@ class FakeSite:
         self.entries = list(entries)
         self.pages = pages or {}
         self.signer = signer or (lambda ids: {"ok": True, "data": {"signedUrls": {}, "expiresAt": None}})
+        self.vault_signer = lambda ids: {"ok": False, "code": "denied"}
         self.list_id = LIST_ID
         self.sign_id = SIGN_ID
         self.signed_out = False
@@ -230,6 +233,8 @@ class FakeSite:
         self.gets.append(path)
         if self.signed_out:
             return Response("<html>login</html>", url="https://auth.humblebundle.com/login?flow=x")
+        if path == "/home/library" and (headers or {}).get("RSC"):
+            return Response(self.pages.get("vault", rsc()))
         if path == "/home/library":
             return Response('<script src="/_next/static/chunks/lib-1.js"></script>'
                             '<script src="/_next/static/chunks/shared.js"></script>')
@@ -237,7 +242,10 @@ class FakeSite:
             return Response('<script src="/_next/static/chunks/item-9.js"></script>'
                             '<script src="/_next/static/chunks/shared.js"></script>')
         if path == "/_next/static/chunks/lib-1.js":
-            return Response(script_with((self.list_id, LIST_ACTION), (OTHER_ID, "recordDownload")))
+            return Response(script_with(
+                (self.list_id, LIST_ACTION), (OTHER_ID, "recordDownload"),
+                (VAULT_ID, VAULT_SIGN_ACTION),
+            ))
         if path == "/_next/static/chunks/item-9.js":
             return Response(script_with((self.sign_id, SIGN_ACTION)))
         if path == "/_next/static/chunks/shared.js":
@@ -264,6 +272,8 @@ class FakeSite:
             }))
         if action == self.sign_id and path.startswith("/home/library/content/"):
             return Response(action_response(self.signer(json.loads(data)[0])))
+        if action == VAULT_ID and path == "/home/library":
+            return Response(action_response(self.vault_signer(json.loads(data)[0])))
         return Response("unknown action", status_code=404)
 
 
@@ -598,3 +608,103 @@ def test_sign_error_field_also_means_signed_out():
     fake = FakeSite(signer=lambda ids: {"ok": False, "error": "not_authenticated"})
     with pytest.raises(NotSignedIn):
         HumbleSite(fake).sign(["e1"])
+
+
+
+###
+# the stream format, properly
+###
+def text_row(row_id, text):
+    """A T row: its length is in bytes, and nothing separates it from the
+    row after"""
+    body = text.encode("utf-8")
+    return "{0}:T{1:x},{2}".format(row_id, len(body), text)
+
+
+def test_rows_after_a_text_row_are_not_lost():
+    stream = (
+        '0:{"a":"$@1"}\n'
+        + text_row("5", "<p>A blurb</p>\nover two lines")
+        + '6:{"after": "the text"}\n'
+        + '7:["also", "here"]\n'
+    )
+    rows = parse_rsc(stream)
+    assert rows["6"] == {"after": "the text"}
+    assert rows["7"] == ["also", "here"]
+    assert "5" not in rows
+
+
+def test_text_row_lengths_are_bytes_not_characters():
+    stream = text_row("a", "Café — naïve 東京\n") + 'b:{"ok": 1}\n'
+    assert parse_rsc(stream) == {"b": {"ok": 1}}
+
+
+def test_a_broken_text_row_does_not_stop_the_rest():
+    stream = "3:Tzz,garbage\n" + '4:{"fine": true}\n'
+    assert parse_rsc(stream) == {"4": {"fine": True}}
+
+
+###
+# the vault
+###
+def vault_item(uuid, machine, title, *downloads):
+    return {
+        "id": uuid, "title": title + " (subscriber_vault)", "type": "$undefined",
+        "collection": "subscriber-vault", "deliveryMethods": [],
+        "entitlements": {"downloads": [{
+            "id": machine, "title": title + " (subscriber_vault)", "type": None,
+            "customCtaLabel": "", "downloads": list(downloads),
+        }], "keys": []},
+    }
+
+
+def vault_page(*items):
+    """Shaped like the real library page: text rows first, then the vault,
+    straight after one of them on the same line"""
+    return (
+        '0:{"a":"$@1"}\n'
+        + text_row("80", "<strong>In a game, someone</strong>\n<p>does things</p>")
+        + text_row("81", "Another blurb — with an em dash, and no newline after")
+        + "82:" + json.dumps(["$", "$L5", None, {"vaultTabVisible": True, "vaultItems": list(items)}]) + "\n"
+    )
+
+
+def test_the_vault_is_read_from_the_library_page():
+    fake = FakeSite(pages={"vault": vault_page(
+        vault_item("u1", "zodiacxx", "Zodiac XX",
+                   download("zodiacxx_win", "windows", struct("zodiacxx_win.zip")),
+                   download("zodiacxx_mac", "mac", struct("zodiacxx_mac.zip"))),
+        vault_item("u2", "otherone", "Other One",
+                   download("otherone_win", "windows", struct("otherone.exe"))),
+    )})
+    order_id, order = HumbleSite(fake).vault()
+    assert order_id == "vault"
+    assert order["product"]["human_name"] == "Humble Vault"
+    assert [s["human_name"] for s in order["subproducts"]] == ["Zodiac XX", "Other One"]
+    entry = order["subproducts"][0]["downloads"][0]["download_struct"][0]
+    assert entry["hbd_sign"] == {"entitlement": "zodiacxx", "download_key": "zodiacxx_win", "vault": True}
+
+
+def test_vault_items_are_signed_by_machine_name_on_the_library_page():
+    fake = FakeSite()
+    fake.vault_signer = lambda ids: {"ok": True, "data": {"signedUrls": {
+        ids[0]: {"zodiacxx_win": {"zodiacxx_win.zip": "https://cdn.example/v.zip?t=1",
+                                  "zodiacxx_win.zip.torrent": "https://cdn.example/t?t=1"}}},
+        "expiresAt": "2030-01-01T00:00:00Z"}}
+    urls, _ = HumbleSite(fake).sign(["zodiacxx"], vault=True)
+    assert urls == {("zodiacxx_win", "zodiacxx_win.zip"): "https://cdn.example/v.zip?t=1"}
+    assert fake.posts[-1] == ("/home/library", VAULT_ID)
+
+
+def test_vault_and_content_signatures_are_cached_apart():
+    calls = []
+
+    class Site:
+        def sign(self, ids, session=None, vault=False):
+            calls.append((ids[0], vault))
+            return {("k", "f.zip"): "https://x/{0}".format(vault)}, None
+
+    signer = UrlSigner(Site())
+    assert signer.url_for("same", "k", "f.zip") == "https://x/False"
+    assert signer.url_for("same", "k", "f.zip", vault=True) == "https://x/True"
+    assert calls == [("same", False), ("same", True)]

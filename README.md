@@ -12,6 +12,7 @@ After that it will only download the content that has been updated or is missing
 ## Features
 
 - works with Humble's rebuilt website (2026), which removed the api older versions relied on
+- the subscriber vault, which replaced the Trove _(`--vault`, or `--trove` for the vault alone)_
 - downloads new and updated content from your Humble Bundle Library on each run _(only check for updates if using `--update`)_
 - cli command for easy use (downloading will also work on a headless system)
 - works for SSO and 2FA accounts
@@ -355,10 +356,14 @@ would still be downloaded.
 The first `--update` run to reach such a file records the date the server reports for it, without
 downloading it, so later updates have something to compare against.
 
-### The Humble Trove
+### The subscriber vault
 
-The Trove is gone from the rebuilt site (it became the subscriber vault) and both endpoints `--trove`
-used now answer 404, so `--trove` stops straight away with a message saying so.
+The Trove is gone from the rebuilt site; it became the vault, the games that come with a Humble
+Choice membership. `--vault` downloads the vault as well as the rest of the library, into a
+`Humble Vault` folder. `--trove` used to mean only the Trove, so it now means only the vault, and old
+scripts keep working. Vault files are signed through the vault's own server action, by each game's
+machine name, and are otherwise handled like everything else: filters, format preference,
+checksums, resuming and the cache all apply.
 
 
 ## Notes

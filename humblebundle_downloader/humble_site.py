@@ -38,6 +38,11 @@ LIBRARY_PATH = "/home/library"
 
 LIST_ACTION = "filterUserLibrary"
 SIGN_ACTION = "getSignedUrlsForEntitlements"
+VAULT_SIGN_ACTION = "getVaultSignedUrls"
+
+# Where vault files go, and their key in the cache
+VAULT_ORDER = "vault"
+VAULT_TITLE = "Humble Vault"
 
 # The only entitlement type with files behind it. The others are keys
 # for steam, epic, gog and so on, which this tool never handled
@@ -57,7 +62,7 @@ CHUNK_RE = re.compile(r"/_next/static/chunks/[^\"'\s<>]+?\.js")
 ACTION_RE = re.compile(
     r'createServerReference\)?\(\s*"([0-9a-f]{40,})"\s*,[^"()]{0,200}"([\w$]+)"\s*\)'
 )
-ROW_RE = re.compile(r"^([0-9a-f]+):([\[{].*)$")
+_ROW_START = re.compile(rb"([0-9a-f]+):")
 
 
 class SiteError(Exception):
@@ -71,18 +76,47 @@ class NotSignedIn(SiteError):
 def parse_rsc(text):
     """Rows of a React server component stream, keyed by row id.
 
-    Each row is ``<hex id>:<payload>``. Only json payloads are kept; the
-    others are module references and text this tool has no use for.
+    Most rows are ``<hex id>:<payload>`` up to the end of the line, and
+    only the json ones are kept. Text rows are different:
+    ``<hex id>:T<hex length>,<text>`` carries exactly that many bytes of
+    text, newlines and all, and the next row follows straight on with
+    no newline between. Reading the stream a line at a time loses every
+    row after one, which on the library page included the whole vault
     """
+    data = text.encode("utf-8") if isinstance(text, str) else text
     rows = {}
-    for line in text.split("\n"):
-        match = ROW_RE.match(line)
+    i, end = 0, len(data)
+    while i < end:
+        if data[i:i + 1] in (b"\n", b"\r"):
+            i += 1
+            continue
+        match = _ROW_START.match(data, i)
         if not match:
+            # Not a row; skip to the next line and look again
+            newline = data.find(b"\n", i)
+            i = end if newline < 0 else newline + 1
             continue
-        try:
-            rows[match.group(1)] = json.loads(match.group(2))
-        except ValueError:
+        row_id = match.group(1).decode()
+        i = match.end()
+        if data[i:i + 1] == b"T":
+            comma = data.find(b",", i)
+            try:
+                length = int(data[i + 1:comma], 16)
+            except ValueError:
+                newline = data.find(b"\n", i)
+                i = end if newline < 0 else newline + 1
+                continue
+            i = comma + 1 + length
             continue
+        newline = data.find(b"\n", i)
+        stop = end if newline < 0 else newline
+        payload = data[i:stop]
+        i = stop + 1
+        if payload[:1] in (b"{", b"["):
+            try:
+                rows[row_id] = json.loads(payload.decode("utf-8"))
+            except ValueError:
+                pass
     return rows
 
 
@@ -105,15 +139,16 @@ def _walk(value, visit, owner=None):
     stack = [(value, owner)]
     while stack:
         item, owner = stack.pop()
+        # Children go on reversed, so they come off in page order
         if isinstance(item, list):
-            stack.extend((child, owner) for child in item)
+            stack.extend((child, owner) for child in reversed(item))
             continue
         if not isinstance(item, dict):
             continue
         if _is_entitlement(item):
             owner = item
         visit(item, owner)
-        stack.extend((child, owner) for child in item.values())
+        stack.extend((child, owner) for child in reversed(list(item.values())))
 
 
 def _is_entitlement(item):
@@ -443,6 +478,46 @@ class HumbleSite:
             )
         return entitlement_files(parse_rsc(response.text))
 
+    def vault(self):
+        """The subscriber vault, as one order. It replaced the Trove.
+
+        Its items come in the library page itself, files and all, under
+        collection "subscriber-vault". Each is signed by its machine name
+        through getVaultSignedUrls rather than by entitlement id
+        """
+        response = self._get(LIBRARY_PATH, headers={"RSC": "1"})
+        found = {}
+
+        def visit(item, owner):
+            if item.get("collection") == "subscriber-vault" and item.get("id"):
+                found.setdefault(item["id"], item)
+
+        for row in parse_rsc(response.text).values():
+            _walk(row, visit)
+
+        items = []
+        for entry in found.values():
+            downloads = ((entry.get("entitlements") or {}).get("downloads")) or []
+            for game in downloads:
+                machine = game.get("id")
+                files = [d for d in game.get("downloads") or [] if d.get("downloadStruct")]
+                if not machine or not files:
+                    continue
+                title = re.sub(
+                    r"\s*\(subscriber_vault\)\s*$", "",
+                    game.get("title") or entry.get("title") or machine,
+                )
+                items.append((machine, title, machine, files))
+
+        logger.info("The vault has {count} item(s)".format(count=len(items)))
+        order = legacy_order(VAULT_ORDER, VAULT_TITLE, items)
+        for sub in order["subproducts"]:
+            for download in sub["downloads"]:
+                for struct in download["download_struct"]:
+                    if "hbd_sign" in struct:
+                        struct["hbd_sign"]["vault"] = True
+        return VAULT_ORDER, order
+
     def orders(self, keys=None):
         """Yield (bundle id, order) for each bundle with files in it.
 
@@ -539,17 +614,22 @@ class HumbleSite:
         )
         return legacy_order(bundle_id, bundle_title, items)
 
-    def sign(self, entitlement_ids, session=None):
-        """Download urls for some entitlements.
+    def sign(self, entitlement_ids, session=None, vault=False):
+        """Download urls for some entitlements, or with vault for some
+        vault items by machine name.
 
         Returns ({(download key, filename): url}, expiry as unix time).
         Humble spends about half a second per entitlement and gives up
         at around ten seconds, so ask for a handful at a time at most
         """
         entitlement_ids = list(entitlement_ids)
+        if vault:
+            name, path = VAULT_SIGN_ACTION, LIBRARY_PATH
+        else:
+            name, path = SIGN_ACTION, LIBRARY_PATH + "/content/" + entitlement_ids[0]
         value = self._call(
-            SIGN_ACTION,
-            LIBRARY_PATH + "/content/" + entitlement_ids[0],
+            name,
+            path,
             session=session,
             data=json.dumps([entitlement_ids]),
         )
@@ -592,9 +672,10 @@ class UrlSigner:
             return self._locks.setdefault(entitlement_id, threading.Lock())
 
     def url_for(self, entitlement_id, download_key, filename, session=None,
-                refresh=False):
-        with self._lock_for(entitlement_id):
-            signed = self._signed.get(entitlement_id)
+                refresh=False, vault=False):
+        slot = ("vault", entitlement_id) if vault else entitlement_id
+        with self._lock_for(slot):
+            signed = self._signed.get(slot)
             now = self.clock()
             stale = signed is None or refresh
             if not stale and signed[1] is not None and signed[1] - self.margin < now:
@@ -603,9 +684,14 @@ class UrlSigner:
                 # the same answer: ask at most once a minute
                 stale = now - signed[2] >= RESIGN_INTERVAL
             if stale:
-                urls, expires = self.site.sign([entitlement_id], session=session)
+                if vault:
+                    urls, expires = self.site.sign(
+                        [entitlement_id], session=session, vault=True
+                    )
+                else:
+                    urls, expires = self.site.sign([entitlement_id], session=session)
                 signed = (urls, expires, now)
-                self._signed[entitlement_id] = signed
+                self._signed[slot] = signed
 
         urls = signed[0]
         url = urls.get((download_key, filename))
@@ -630,19 +716,23 @@ class SignedUrl:
     up front would expire long before a large library finished
     """
 
-    def __init__(self, signer, entitlement_id, download_key, filename):
+    def __init__(self, signer, entitlement_id, download_key, filename,
+                 vault=False):
         self.signer = signer
         self.entitlement_id = entitlement_id
         self.download_key = download_key
         self.filename = filename
+        self.vault = vault
 
     def resolve(self, session=None, refresh=False):
+        kwargs = {"vault": True} if self.vault else {}
         return self.signer.url_for(
             self.entitlement_id,
             self.download_key,
             self.filename,
             session=session,
             refresh=refresh,
+            **kwargs
         )
 
     def __str__(self):

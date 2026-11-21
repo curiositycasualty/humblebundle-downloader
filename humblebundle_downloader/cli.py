@@ -47,12 +47,20 @@ def parse_args(args):
         required=True,
     )
     parser.add_argument(
+        "--vault",
+        action="store_true",
+        help=(
+            "Also download the subscriber vault, the games that come with a "
+            "Humble Choice membership"
+        ),
+    )
+    parser.add_argument(
         "-t",
         "--trove",
         action="store_true",
         help=(
-            "No longer works: the Humble Trove was removed from the site "
-            "and replaced by the subscriber vault"
+            "Only the subscriber vault, which is what the Humble Trove "
+            "became. Same as --vault without the rest of the library"
         ),
     )
     parser.add_argument(
@@ -266,6 +274,7 @@ def cli():
             prefer_format=cli_args.prefer_format,
             purchase_keys=cli_args.keys,
             trove=cli_args.trove,
+            vault=cli_args.vault,
             update=cli_args.update,
             dry_run=cli_args.dry_run,
             print_urls=cli_args.print_urls,

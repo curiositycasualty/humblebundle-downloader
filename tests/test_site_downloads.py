@@ -11,7 +11,7 @@ from humblebundle_downloader.download_library import (
     DownloadLibrary,
     _looks_like_cookie_header,
 )
-from humblebundle_downloader.humble_site import NotSignedIn, SiteError
+from humblebundle_downloader.humble_site import NotSignedIn
 
 from .test_humble_site import (
     FakeSite,
@@ -339,9 +339,40 @@ def test_update_takes_an_adopted_file_as_its_baseline(tmp_path):
     assert fake.streamed == []
 
 
-def test_trove_says_it_is_gone(tmp_path):
-    with pytest.raises(SiteError, match="vault"):
-        DownloadLibrary(str(tmp_path), trove=True).start()
+def with_vault(fake):
+    from .test_humble_site import vault_item, vault_page
+
+    fake.bodies["vaultgame.zip"] = b"a game from the vault " * 30
+    fake.pages["vault"] = vault_page(vault_item(
+        "u1", "vaultgame", "Vault Game",
+        download("vaultgame_win", "windows", real_struct("vaultgame.zip", body=fake.bodies["vaultgame.zip"])),
+    ))
+    fake.vault_signer = lambda ids: {"ok": True, "data": {"signedUrls": {ids[0]: {
+        "vaultgame_win": {"vaultgame.zip": "https://cdn.example/vaultgame.zip?t=9"}}},
+        "expiresAt": "2030-01-01T00:00:00Z"}}
+    return fake
+
+
+def test_vault_downloads_alongside_the_library(tmp_path):
+    fake = with_vault(FakeHumble(*two_bundles()))
+    library(tmp_path, fake, jobs=2, vault=True).start()
+    got = files_under(tmp_path / "lib")
+    assert "Humble Vault/Vault Game/vaultgame.zip" in got
+    assert "Bundle Two/Game/game.exe" in got
+    assert "vault:vaultgame.zip" in cache_of(tmp_path)
+
+
+def test_trove_now_means_only_the_vault(tmp_path):
+    fake = with_vault(FakeHumble(*two_bundles()))
+    library(tmp_path, fake, jobs=1, trove=True).start()
+    assert files_under(tmp_path / "lib") == ["Humble Vault/Vault Game/vaultgame.zip"]
+    assert not [p for p, _ in fake.posts if p == "/home/library" and _ == fake.list_id]
+
+
+def test_without_vault_the_vault_is_left_alone(tmp_path):
+    fake = with_vault(FakeHumble(*two_bundles()))
+    library(tmp_path, fake, jobs=1).start()
+    assert not any(p.startswith("Humble Vault") for p in files_under(tmp_path / "lib"))
 
 
 @pytest.mark.parametrize("value,header", [

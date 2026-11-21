@@ -3,6 +3,13 @@
 
 ## Unreleased
 
+- Added `--vault`, for the subscriber vault that replaced the Trove: its games download into a
+  `Humble Vault` folder, signed through the vault's own server action. `--trove`, which meant only
+  the Trove, now means only the vault
+- Fixed reading the site's pages losing data. Text rows in the stream carry their length in bytes
+  and are followed directly by the next row, with no newline; the page was read a line at a time,
+  so every row after a text row went missing. On the library page that was the whole vault, and on
+  a bundle page with descriptions it could push items onto the slower one-page-per-item fallback
 - A file stopped part way by Ctrl+C is now kept as `<file>.part`, with a `<file>.part.json` noting
   which version of the file it came from, and the next run carries on from where it stopped instead
   of downloading it again from the start. It asks for the rest only if the file is unchanged

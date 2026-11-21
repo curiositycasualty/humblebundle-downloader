@@ -986,6 +986,7 @@ class DownloadLibrary:
         prefer_format=None,
         purchase_keys=None,
         trove=False,
+        vault=False,
         update=False,
         dry_run=False,
         print_urls=False,
@@ -1091,6 +1092,7 @@ class DownloadLibrary:
 
         self.purchase_keys = purchase_keys
         self.trove = trove
+        self.vault = vault
         self.update = update
         self.dry_run = dry_run
         self.print_urls = print_urls
@@ -1208,14 +1210,6 @@ class DownloadLibrary:
     def start(self):
         self._check_library_path()
 
-        if self.trove is True:
-            # Both trove endpoints answer 404 since the rebuild. The trove
-            # became the subscriber vault, which needs its own support
-            raise SiteError(
-                "The Humble Trove is gone from the rebuilt site (it became "
-                "the subscriber vault), so --trove cannot work any more"
-            )
-
         self.cache_file = os.path.join(self.library_path, ".cache.json")
         self.cache_data = self._load_cache_data(self.cache_file)
         if self.purchase_keys:
@@ -1234,9 +1228,7 @@ class DownloadLibrary:
             try:
                 self._start_workers()
 
-                for order_id, order in self.site.orders(
-                    keys=self.purchase_keys or None
-                ):
+                for order_id, order in self._all_orders():
                     if self._stop.is_set():
                         # Interrupted, or something a worker found that
                         # the rest of the run would hit too
@@ -1655,6 +1647,17 @@ class DownloadLibrary:
         session.cookies.update(self.session.cookies)
         return session
 
+    def _all_orders(self):
+        """The library's bundles, then the vault when asked for. --trove
+        meant only the Trove, so it now means only the vault, which is
+        what the Trove became
+        """
+        if self.trove is not True:
+            for order_id, order in self.site.orders(keys=self.purchase_keys or None):
+                yield order_id, order
+        if self.trove is True or self.vault is True:
+            yield self.site.vault()
+
     def _process_order(self, order_id, order):
         """Queue everything in one bundle, given in the old api's shape"""
         if not isinstance(order, dict) or "product" not in order:
@@ -1795,6 +1798,7 @@ class DownloadLibrary:
                                 signing["entitlement"],
                                 signing["download_key"],
                                 url_filename,
+                                vault=bool(signing.get("vault")),
                             )
 
                         if (
