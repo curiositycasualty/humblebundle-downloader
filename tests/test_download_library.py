@@ -990,19 +990,110 @@ def test_first_interrupt_sets_stop_and_raises():
         dl._restore_interrupt_handler(previous)
 
 
-def test_second_interrupt_exits_hard():
+def test_first_interrupt_hands_the_second_to_the_operating_system():
     dl = DownloadLibrary("fake_library_path")
-    forced = []
-    dl._hard_exit = lambda: forced.append(True)
     previous = dl._install_interrupt_handler()
     handler = signal.getsignal(signal.SIGINT)
     try:
         with pytest.raises(KeyboardInterrupt):
             handler(signal.SIGINT, None)
-        handler(signal.SIGINT, None)   # no raise: it leaves instead
-        assert forced == [True]
+        assert signal.getsignal(signal.SIGINT) is signal.SIG_DFL
     finally:
         dl._restore_interrupt_handler(previous)
+    assert signal.getsignal(signal.SIGINT) is not signal.SIG_DFL
+
+
+SECOND_PRESS_SCRIPT = r"""
+import sys, threading, time
+sys.path.insert(0, {root!r})
+from humblebundle_downloader.download_library import DownloadLibrary, ProgressReporter
+
+class Tty:
+    def isatty(self): return True
+    def write(self, text): pass
+    def flush(self): pass
+
+dl = DownloadLibrary("unused", jobs=2)
+dl._progress = ProgressReporter(stream=Tty(), slots=2)
+dl._progress._painted = 3
+dl._install_interrupt_handler()
+
+# Another thread takes the terminal lock and never lets go, as a worker
+# stuck writing to a wedged terminal would
+held = threading.Event()
+def hog():
+    dl._progress._term.acquire()
+    held.set()
+    threading.Event().wait()
+threading.Thread(target=hog, daemon=True).start()
+held.wait()
+
+print("ready", flush=True)
+try:
+    while True:
+        time.sleep(0.05)
+except KeyboardInterrupt:
+    print("first press seen", flush=True)
+    # Then the main thread gets stuck too, the way a wedged shutdown
+    # does, while it holds nothing and waits on everything
+    dl._progress.clear()
+"""
+
+
+def test_two_presses_kill_the_run_whatever_it_is_stuck_on():
+    import subprocess
+    import sys
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    proc = subprocess.Popen(
+        [sys.executable, "-c", SECOND_PRESS_SCRIPT.format(root=root)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    def line(timeout=5):
+        import select
+
+        ready, _, _ = select.select([proc.stdout], [], [], timeout)
+        assert ready, "the run stopped responding"
+        return proc.stdout.readline().strip()
+
+    try:
+        assert line(timeout=20) == "ready"
+        proc.send_signal(signal.SIGINT)
+        assert line() == "first press seen"
+        time.sleep(0.3)
+        assert proc.poll() is None, "one press should not kill it"
+        proc.send_signal(signal.SIGINT)
+        code = proc.wait(timeout=5)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+    assert code == -signal.SIGINT
+    assert "Stopping" in proc.stderr.read()
+
+
+def test_the_display_cannot_hold_up_a_run_that_is_leaving():
+    from humblebundle_downloader.download_library import ProgressReporter
+
+    class Tty(io.StringIO):
+        def isatty(self):
+            return True
+
+    reporter = ProgressReporter(stream=Tty(), slots=2, interval=0.01)
+    reporter.STOP_WAIT = 0.2
+    reporter.start()
+    held = threading.Event()
+
+    def hog():
+        reporter._term.acquire()
+        held.set()
+        threading.Event().wait()
+
+    threading.Thread(target=hog, daemon=True).start()
+    held.wait()
+    started = time.time()
+    reporter.stop()
+    assert time.time() - started < 2
 
 
 ###

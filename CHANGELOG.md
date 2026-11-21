@@ -3,6 +3,12 @@
 
 ## Unreleased
 
+- A second Ctrl+C now always quits, even with downloads in flight. It used to be handled in
+  Python, which meant waiting for the main thread and taking the terminal lock first; with the
+  progress display up, a thread holding that lock could keep either press from getting through.
+  After the first press, the second is left to the operating system, which ends the process at
+  once. The progress display also gives up after two seconds when a run is leaving, rather than
+  waiting on a stuck terminal
 - Added a `train` progress style: a little train running down the rails, leaving steam behind
 - The first Ctrl+C now waits up to five minutes for a stuck transfer by default, up from ten
   seconds. Moving transfers still stop at their next chunk; `--exit-timeout` still overrides it and

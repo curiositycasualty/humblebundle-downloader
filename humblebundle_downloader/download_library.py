@@ -128,6 +128,16 @@ def _jar_from_header(jar, header):
             jar.set(name.strip(), value.strip(), domain=SITE_HOST, path="/")
 
 
+def _write_fd(fd, text):
+    """Write to a file descriptor directly, past Python's buffered
+    streams and their locks. For a signal handler, which may have
+    interrupted a thread that was in the middle of writing"""
+    try:
+        os.write(fd, text.encode("utf-8", "replace"))
+    except OSError:
+        pass
+
+
 def _looks_like_cookie_header(value):
     """name=value, as opposed to a bare session value.
 
@@ -260,7 +270,7 @@ class NullReporter:
     def stop(self):
         pass
 
-    def clear(self):
+    def clear(self, wait=None):
         pass
 
     def paint(self):
@@ -273,6 +283,9 @@ class NullReporter:
         pass
 
     def detach_logging(self):
+        pass
+
+    def forget_painted(self):
         pass
 
     def render(self, width=80, height=24):
@@ -318,6 +331,8 @@ class ProgressReporter:
     MIN_NAME = 10
     MAX_BAR = 20
     MIN_BAR = 6
+    # Longest the display may hold up a run that is leaving
+    STOP_WAIT = 2.0
 
     def __init__(self, stream=None, slots=1, interval=0.2, window=3.0,
                  style=DEFAULT_PROGRESS_STYLE):
@@ -373,10 +388,19 @@ class ProgressReporter:
         if self._thread is None:
             return
         self._stop.set()
-        self._thread.join()
+        # Bounded: a painter stuck on a wedged terminal must not keep
+        # the run from leaving, and it is a daemon thread anyway
+        self._thread.join(timeout=self.STOP_WAIT)
         self._thread = None
         self.detach_logging()
-        self.clear()
+        self.clear(wait=self.STOP_WAIT)
+
+    def forget_painted(self):
+        """Draw the block afresh from here on, rather than over the rows
+        it last used. For when something has written to the terminal
+        without going through the lock, which only the Ctrl-C notice does
+        """
+        self._painted = 0
 
     def attach_logging(self):
         """Route log lines bound for the terminal through the block.
@@ -649,9 +673,15 @@ class ProgressReporter:
         except Exception:
             pass
 
-    def clear(self):
-        """Wipe the block so ordinary log output lands on clean rows"""
-        with self._term:
+    def clear(self, wait=None):
+        """Wipe the block so ordinary log output lands on clean rows.
+
+        wait bounds how long to wait for the terminal; past it the block
+        is left as it is rather than holding anything up
+        """
+        if not self._term.acquire(timeout=-1 if wait is None else wait):
+            return
+        try:
             if not self._painted or not self.enabled():
                 self._painted = 0
                 return
@@ -660,6 +690,8 @@ class ProgressReporter:
             out.append("\033[{0}A".format(self._painted))
             self._painted = 0
             self._write("".join(out))
+        finally:
+            self._term.release()
 
     def paint(self):
         if not self.enabled():
@@ -1136,22 +1168,28 @@ class DownloadLibrary:
             return None
 
         def handler(signum, frame):
-            if self._stop.is_set():
-                self._progress.clear()
-                sys.stderr.write(
-                    "\nQuitting now. Partly downloaded files are left "
-                    "behind and will be redone next run.\n"
-                )
-                self._hard_exit()
-                return
-
             self._stop.set()
-            self._progress.clear()
-            sys.stderr.write(
+            # The second press is the operating system's, not ours. A
+            # Python handler only runs when the main thread gets to it,
+            # and quitting from one meant taking the terminal lock and
+            # writing through sys.stderr, either of which another thread
+            # can be holding at the time. Then the press that was meant
+            # to quit whatever state things are in would wait on them
+            # instead. With the default action, the kernel ends the
+            # process the moment it arrives
+            try:
+                signal.signal(signal.SIGINT, signal.SIG_DFL)
+            except (ValueError, OSError):
+                pass
+            # Straight to the descriptor: no locks, no buffer another
+            # thread might be in the middle of. The block is drawn afresh
+            # below this rather than over it
+            self._progress.forget_painted()
+            _write_fd(
+                2,
                 "\nStopping. Waiting for downloads in flight, press "
-                "Ctrl-C again to quit immediately.\n"
+                "Ctrl-C again to quit immediately.\n",
             )
-            sys.stderr.flush()
             # Same as the default handler, so anything the main thread
             # is blocked on unwinds exactly as it used to
             raise KeyboardInterrupt
