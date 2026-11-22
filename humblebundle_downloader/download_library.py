@@ -92,6 +92,7 @@ class DownloadLibrary(WalkMixin, SelectionMixin, TransferMixin, CacheMixin):
         shutdown_grace=None,
         log_skipped=True,
         listener=None,
+        reset_cache=False,
     ):
         self.library_path = library_path
         # "auto" runs as many workers as it might ever want, and a gate
@@ -110,6 +111,8 @@ class DownloadLibrary(WalkMixin, SelectionMixin, TransferMixin, CacheMixin):
         self.verify = verify
         # Whether every file a filter passes over is announced
         self.log_skipped = log_skipped
+        # Start from an empty cache, setting the old one aside
+        self.reset_cache = reset_cache
         # How long a first Ctrl-C waits for transfers in flight. Read
         # from the module default when not given, so it stays one place
         # to change for anyone embedding this
@@ -323,7 +326,10 @@ class DownloadLibrary(WalkMixin, SelectionMixin, TransferMixin, CacheMixin):
         self._check_library_path()
 
         self.cache_file = os.path.join(self.library_path, ".cache.json")
-        self.cache_data = self._load_cache_data(self.cache_file)
+        if self.reset_cache:
+            self.cache_data = self._reset_cache(self.cache_file)
+        else:
+            self.cache_data = self._load_cache_data(self.cache_file)
         if self.purchase_keys:
             self.purchase_keys = self._dedupe_keys(self.purchase_keys)
 

@@ -7,6 +7,7 @@ import os
 import tempfile
 import time
 
+from .errors import LibraryPathError
 from .files import _coerce_size, _much_smaller, _remove_quietly, _resume_note
 
 # Under the engine's name, as before the split, so anything filtering
@@ -146,6 +147,42 @@ class CacheMixin:
         """Where a file is in the library, as the cache records it so
         --verify can find it again: relative, with forward slashes"""
         return os.path.relpath(local_file, self.library_path).replace(os.sep, "/")
+
+    def _reset_cache(self, cache_file):
+        """--reset-cache: start from an empty cache.
+
+        The old one is set aside rather than deleted. It holds the
+        checksums --verify checks against, which a fresh start cannot
+        get back, so it stays to be put back by hand if wanted. Files
+        already on disk are not downloaded again: with no cache entry,
+        each one found at the right size is recorded afresh. A dry run
+        pretends the cache is empty and leaves the file as it is.
+        """
+        if not os.path.exists(cache_file):
+            logger.info("--reset-cache: there was no cache, starting from nothing")
+            return {}
+        if self.dry_run is True:
+            logger.info(
+                "--reset-cache: acting as if the cache were empty (a dry run "
+                "leaves it as it is)"
+            )
+            return {}
+        stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        aside = "{0}.reset-{1}.bak".format(cache_file, stamp)
+        try:
+            os.replace(cache_file, aside)
+        except OSError as error:
+            raise LibraryPathError(
+                "--reset-cache could not set {0} aside: {1}".format(
+                    cache_file, error.strerror or error
+                )
+            ) from error
+        logger.warning(
+            "--reset-cache: starting from an empty cache. The old one is kept "
+            "as {0}; files already on disk at the right size are recorded "
+            "again rather than downloaded".format(os.path.basename(aside))
+        )
+        return {}
 
     def _load_cache_data(self, cache_file):
         self._clear_stale_cache_temps(cache_file)

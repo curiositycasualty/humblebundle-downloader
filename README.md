@@ -371,6 +371,18 @@ report is safe to paste into an issue or a chat: it names cookies but never show
 and gives counts and field names rather than bundle ids, keys or download urls. It needs no
 library path, and exits `1` if anything failed.
 
+### Starting the cache afresh
+
+`--reset-cache` starts a run from an empty cache, for when `.cache.json` has gone wrong or you want
+it rebuilt from what is actually on disk. The old one is not deleted: it is set aside as
+`.cache.json.reset-<date>.bak`, because it holds the checksums `--verify` checks against, and a
+fresh start cannot get those back for files it does not download. Move it back to undo.
+
+Nothing already on disk is downloaded again. With no cache entry, each file found at the size Humble
+gives (asked with a `HEAD` where the listing is stale) is recorded afresh, so the run is mostly a
+walk through the library. With `--dry-run` it only acts as if the cache were empty and leaves the
+file alone. It cannot go in the settings file, and does not go with `--verify`.
+
 ### Verifying the library
 
 `hbd --library-path "Downloaded Library" --verify` downloads nothing. It hashes every file in the

@@ -45,6 +45,9 @@ The interface is new, and the engine underneath no longer draws anything itself.
   as a default, with the command line winning. Unknown keys are errors that name them; `--verify`,
   `--diagnose` and `--dry-run` cannot be set there. A cookie kept there gets a warning if others
   can read the file
+- `--reset-cache` starts a run from an empty cache, setting the old one aside as
+  `.cache.json.reset-<date>.bak` rather than deleting it; files already on disk are recorded again,
+  not downloaded
 - New dependencies: rich and textual (and tomli on Python 3.10)
 
 

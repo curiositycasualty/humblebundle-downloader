@@ -92,6 +92,15 @@ def parse_args(args, environ=None):
         help=("Check to see if products have been updated " "(still get new products)"),
     )
     parser.add_argument(
+        "--reset-cache",
+        action="store_true",
+        help=(
+            "Start from an empty cache. The old .cache.json is kept beside it "
+            "as .cache.json.reset-<date>.bak, and files already on disk at the "
+            "right size are recorded again rather than downloaded"
+        ),
+    )
+    parser.add_argument(
         "-p",
         "--platform",
         type=str,
@@ -277,6 +286,8 @@ def parse_args(args, environ=None):
     parsed.config_has_cookie = "session_auth" in settings
     if not parsed.verify and not (parsed.cookie_file or parsed.session_auth):
         parser.error("one of the arguments -c/--cookie-file -s/--session-auth is required")
+    if parsed.reset_cache and (parsed.verify or parsed.diagnose):
+        parser.error("--reset-cache only goes with a download run: --verify needs the cache it would set aside")
     if not parsed.library_path and not parsed.diagnose:
         parser.error("the following arguments are required: -l/--library-path")
     return parsed
@@ -533,6 +544,7 @@ def cli():
             verify=not cli_args.no_verify,
             shutdown_grace=cli_args.exit_timeout,
             log_skipped=not cli_args.hide_skipped,
+            reset_cache=cli_args.reset_cache,
             listener=listener,
         )
         if interactive:

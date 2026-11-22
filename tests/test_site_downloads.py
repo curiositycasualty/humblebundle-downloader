@@ -1362,3 +1362,54 @@ def test_skip_gives_up_on_one_file_and_keeps_its_part(tmp_path, caplog):
     assert dl.failed_files == []
     assert "Skipped two.pdf" in caplog.text
     assert not dl._skipping
+
+
+###
+# --reset-cache
+###
+def test_reset_cache_sets_the_old_one_aside_and_downloads_nothing_again(tmp_path, caplog):
+    import logging
+
+    library(tmp_path, FakeHumble(*two_bundles()), jobs=2).start()
+    lib = tmp_path / "lib"
+    before = json.loads((lib / ".cache.json").read_text())
+    caplog.set_level(logging.INFO)
+    fake = FakeHumble(*two_bundles())
+    library(tmp_path, fake, jobs=2, reset_cache=True).start()
+    (aside,) = [p for p in lib.iterdir() if p.name.startswith(".cache.json.reset-")]
+    assert json.loads(aside.read_text()) == before
+    after = json.loads((lib / ".cache.json").read_text())
+    assert set(after) == set(before)
+    assert all(entry.get("adopted") and entry.get("path") for entry in after.values())
+    # Nothing was downloaded again: the bodies were never streamed
+    assert fake.streamed == []
+    assert "--reset-cache: starting from an empty cache" in caplog.text
+
+
+def test_a_dry_run_reset_leaves_the_cache_file_alone(tmp_path):
+    library(tmp_path, FakeHumble(*two_bundles()), jobs=1).start()
+    lib = tmp_path / "lib"
+    before = (lib / ".cache.json").read_text()
+    library(tmp_path, FakeHumble(*two_bundles()), dry_run=True, reset_cache=True).start()
+    assert (lib / ".cache.json").read_text() == before
+    assert not [p for p in lib.iterdir() if ".reset-" in p.name]
+
+
+def test_reset_with_no_cache_just_starts(tmp_path):
+    library(tmp_path, FakeHumble(*two_bundles()), jobs=1, reset_cache=True).start()
+    assert len(files_under(tmp_path / "lib")) == 4
+
+
+def test_reset_cache_is_refused_with_verify_and_in_settings(tmp_path, monkeypatch, capsys):
+    from humblebundle_downloader.cli import parse_args
+
+    with pytest.raises(SystemExit):
+        parse_args(["-l", "x", "--verify", "--reset-cache"])
+    assert "--verify needs the cache" in capsys.readouterr().err
+    settings = tmp_path / "config.toml"
+    settings.write_text("reset-cache = true")
+    monkeypatch.setenv("HBD_CONFIG", str(settings))
+    with pytest.raises(SystemExit):
+        parse_args(["-l", "x", "-s", "y"])
+    assert "chosen on the command line" in capsys.readouterr().err
+    assert parse_args(["-l", "x", "-s", "y", "--reset-cache", "--no-config"]).reset_cache is True

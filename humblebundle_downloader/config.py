@@ -12,7 +12,8 @@ as keys:
 
 Anything given on the command line wins. What a run is (--verify,
 --diagnose, --dry-run) is never taken from the file: a default that
-quietly turns every run into a dry run would be a trap.
+quietly turns every run into a dry run would be a trap. Nor is
+--reset-cache, which would set the cache aside on every run.
 """
 import os
 import stat
@@ -24,7 +25,7 @@ else:  # pragma: no cover
     import tomli as tomllib
 
 # Options that choose what a run does, or which config to read
-NOT_IN_CONFIG = {"verify", "diagnose", "dry_run", "config", "no_config", "help"}
+NOT_IN_CONFIG = {"verify", "diagnose", "dry_run", "reset_cache", "config", "no_config", "help"}
 
 
 class ConfigError(Exception):
