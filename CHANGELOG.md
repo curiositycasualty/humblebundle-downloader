@@ -28,6 +28,9 @@ The interface is new, and the engine underneath no longer draws anything itself.
 - Each run keeps its whole log in `<library>/.hbd-logs/`, the newest 20 runs' worth, and says
   where at the end. Dry runs keep none; `--no-log-file` turns it off. Query strings (download
   tokens) are taken out of every url in every log line, in the file and on screen
+- An item's formats are sized up at the same time when `-f largest` (or the fallback) has to
+  compare them, so an item in four formats costs one round trip rather than four. Every thread
+  but the walk's own now has a connection of its own, whatever `-j` is
 - New dependencies: rich and textual
 
 

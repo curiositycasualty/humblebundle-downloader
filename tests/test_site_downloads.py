@@ -3,6 +3,7 @@ a fake site and a fake CDN"""
 import json
 import hashlib
 import os
+import time
 import threading
 
 import pytest
@@ -1201,3 +1202,75 @@ def test_request_stop_twice_is_once(tmp_path):
     dl.request_stop()
     dl.request_stop()
     assert heard.heard.count(("stopping",)) == 1
+
+
+###
+# An item's formats are sized up side by side
+###
+def four_formats():
+    names = ["comic.cbz", "comic.pdf", "comic.epub", "comic.cbr"]
+    bodies = {name: name.encode() * (n + 1) * 10 for n, name in enumerate(names)}
+    entries = [entry("e1", "b1", "Comic", "Bundle")]
+    pages = {"/home/library/b1": bundle_page("b1", "Bundle", entitlement(
+        "e1", "Comic", download("k1", "ebook", *[real_struct(n, body=bodies[n]) for n in names])))}
+    return FakeHumble(entries, pages, bodies=bodies), bodies
+
+
+class SlowHeads:
+    """Wraps a FakeHumble so each size request takes a while, and notes
+    which sessions asked and how many at once"""
+
+    def __init__(self, fake, delay=0.2):
+        self.fake = fake
+        self.delay = delay
+        self.busy = self.most = 0
+        self.sessions = set()
+        self.lock = threading.Lock()
+
+    def session(self):
+        outer = self
+        fake = self.fake
+
+        class Session:
+            headers = fake.headers
+            cookies = fake.cookies
+
+            def head(self, url, **kwargs):
+                with outer.lock:
+                    outer.busy += 1
+                    outer.most = max(outer.most, outer.busy)
+                    outer.sessions.add(id(self))
+                time.sleep(outer.delay)
+                try:
+                    return outer.fake.head(url, **kwargs)
+                finally:
+                    with outer.lock:
+                        outer.busy -= 1
+
+            def __getattr__(self, name):
+                return getattr(outer.fake, name)
+
+        return Session()
+
+
+def test_an_items_formats_are_sized_at_the_same_time(tmp_path):
+    fake, bodies = four_formats()
+    slow = SlowHeads(fake)
+    dl = library(tmp_path, fake, dry_run=True, prefer_format=["largest"])
+    dl._new_session = slow.session
+    started = time.time()
+    dl.start()
+    took = time.time() - started
+    assert [os.path.basename(p["local_file"]) for p in dl.pending_downloads] == ["comic.cbr"]
+    assert slow.most == 4
+    # Each size request came from a session of its own thread
+    assert len(slow.sessions) == 4
+    assert took < 4 * slow.delay
+
+
+def test_a_single_format_asks_nothing_and_needs_no_threads(tmp_path):
+    fake, _ = four_formats()
+    dl = library(tmp_path, fake, dry_run=True, prefer_format=["largest"], ext_include=["pdf"])
+    dl.start()
+    assert fake.cdn_gets == []
+    assert getattr(dl, "_sizer", None) is None

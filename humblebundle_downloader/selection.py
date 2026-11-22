@@ -1,6 +1,7 @@
 """Which files are wanted: platforms, extensions and --prefer-format"""
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 
 from .files import _coerce_size, _file_ext
 from .formatting import _human_size
@@ -13,6 +14,9 @@ logger = logging.getLogger("humblebundle_downloader.download_library")
 
 # --prefer-format keyword: the biggest file, whatever its format
 LARGEST = "largest"
+# How many of an item's formats are sized up at once. Items rarely come
+# in more than four
+SIZE_CHECKS = 4
 
 
 class SelectionMixin:
@@ -65,14 +69,35 @@ class SelectionMixin:
 
     def _take_largest(self, candidates, product_title, platform, wanted):
         """The biggest of the candidates, by what the server sends now
-        rather than what Humble lists"""
-        sizes = [self._real_size(entry) for entry in candidates]
+        rather than what Humble lists. Each is asked about at the same
+        time, so an item in four formats costs one round trip, not four
+        """
+        sizes = self._real_sizes(candidates)
         biggest = max(range(len(candidates)), key=lambda i: sizes[i] or 0)
         largest = candidates[biggest]
         self._log_format_choice(
             product_title, platform, wanted, candidates, [largest], sizes
         )
         return [largest]
+
+    def _real_sizes(self, entries):
+        if len(entries) < 2 or not any(e.signing for e in entries):
+            return [self._real_size(entry) for entry in entries]
+        return list(self._size_pool().map(self._real_size, entries))
+
+    def _size_pool(self):
+        pool = getattr(self, "_sizer", None)
+        if pool is None:
+            pool = self._sizer = ThreadPoolExecutor(
+                max_workers=SIZE_CHECKS, thread_name_prefix="hbd-size"
+            )
+        return pool
+
+    def _close_size_pool(self):
+        pool = getattr(self, "_sizer", None)
+        if pool is not None:
+            self._sizer = None
+            pool.shutdown(wait=False, cancel_futures=True)
 
     def _real_size(self, entry):
         """A file's size as the server has it now.

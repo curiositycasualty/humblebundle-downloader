@@ -296,9 +296,13 @@ class DownloadLibrary(WalkMixin, SelectionMixin, TransferMixin, CacheMixin):
 
     def start(self):
         began = time.monotonic()
+        # The thread running the walk uses self.session; every other
+        # thread gets one of its own (see _session)
+        self._owner = threading.current_thread()
         try:
             self._run()
         finally:
+            self._close_size_pool()
             # Last, however the run ended: finished, failed or interrupted
             self._log_runtime(time.monotonic() - began)
 
@@ -732,9 +736,13 @@ class DownloadLibrary(WalkMixin, SelectionMixin, TransferMixin, CacheMixin):
 
     def _session(self):
         """requests.Session is not documented as thread safe, so every
-        worker thread gets its own, built from the authenticated one
+        thread but the one running the walk gets its own, built from the
+        authenticated one: download workers, and the threads that size
+        up an item's formats side by side
         """
-        if self._queue is None:
+        if threading.current_thread() is getattr(self, "_owner", None) or (
+            self._queue is None and getattr(self, "_owner", None) is None
+        ):
             return self.session
 
         session = getattr(self._thread_local, "session", None)
