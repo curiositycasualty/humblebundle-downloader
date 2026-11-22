@@ -30,6 +30,7 @@ import time
 import logging
 import datetime
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,9 @@ VAULT_TITLE = "Humble Vault"
 DOWNLOADABLE = "download_drm_free"
 
 LIST_PAGE_SIZE = 1000
+# Bundle pages read at once, ahead of the bundle being checked. Each is a
+# second or so of Humble working out the page, little of it bandwidth
+READERS = 4
 
 # A signed url is used for as long as Humble says it is good for, less
 # this much, so a transfer is not started on one about to lapse. Humble
@@ -257,8 +261,14 @@ def legacy_order(bundle_id, bundle_title, items):
 class HumbleSite:
     """The library, read the way the website reads it"""
 
-    def __init__(self, session, base_url=BASE_URL, page_size=LIST_PAGE_SIZE):
+    def __init__(self, session, base_url=BASE_URL, page_size=LIST_PAGE_SIZE,
+                 readers=READERS, session_factory=None):
         self.session = session
+        self.readers = max(1, int(readers))
+        # A session per reader thread, since requests does not promise
+        # one can be shared. Without a factory they share this one
+        self._session_factory = session_factory
+        self._local = threading.local()
         self.base_url = base_url.rstrip("/")
         self.page_size = page_size
         self._actions = None
@@ -467,9 +477,17 @@ class HumbleSite:
 
         return entries
 
-    def page_files(self, path):
+    def _reader_session(self):
+        if self._session_factory is None:
+            return self.session
+        session = getattr(self._local, "session", None)
+        if session is None:
+            session = self._local.session = self._session_factory()
+        return session
+
+    def page_files(self, path, session=None):
         """Entitlement files rendered on one page of the library"""
-        response = self._get(path, headers={"RSC": "1"})
+        response = self._get(path, session=session, headers={"RSC": "1"})
         if response.status_code != 200:
             raise SiteError(
                 "{path} answered http {status}".format(
@@ -522,8 +540,9 @@ class HumbleSite:
         """Yield (bundle id, order) for each bundle with files in it.
 
         keys limits the run to those bundles, by the id in the url of
-        the bundle's library page. Bundles are read one at a time, so
-        downloads can start while the rest are still being read
+        the bundle's library page. Bundles come out in library order,
+        with the next few already being read meanwhile, so downloads can
+        start while the rest of the library is still being read
         """
         entries = self.library()
         downloadable = [e for e in entries if e.get("type") == DOWNLOADABLE]
@@ -547,8 +566,8 @@ class HumbleSite:
                 )
             bundles = {k: v for k, v in bundles.items() if k in wanted}
 
-        for bundle_id, members in bundles.items():
-            yield bundle_id, self._bundle_order(bundle_id, members)
+        for bundle_id, order in self._read_ahead(list(bundles.items())):
+            yield bundle_id, order
 
         if self.empty_entries:
             logger.info(
@@ -556,11 +575,49 @@ class HumbleSite:
                 "coupons and the like)".format(count=len(self.empty_entries))
             )
 
-    def _bundle_order(self, bundle_id, members):
+    def _read_ahead(self, bundles):
+        """(bundle id, order) in library order, with the next few bundles'
+        pages already being read while one is checked. Whatever is still
+        running when the caller stops listening is abandoned
+        """
+        if self.readers < 2 or len(bundles) < 2:
+            for bundle_id, members in bundles:
+                yield bundle_id, self._bundle_order(bundle_id, members)
+            return
+
+        pool = ThreadPoolExecutor(
+            max_workers=self.readers, thread_name_prefix="hbd-read"
+        )
+        pending = []
+        upcoming = iter(bundles)
+        try:
+            while True:
+                # Keep a couple of pages per reader in hand, not the
+                # whole library: each holds a bundle's worth of listing
+                while len(pending) < self.readers * 2:
+                    try:
+                        bundle_id, members = next(upcoming)
+                    except StopIteration:
+                        break
+                    pending.append((bundle_id, pool.submit(
+                        self._bundle_order, bundle_id, members,
+                        session=None,
+                    )))
+                if not pending:
+                    return
+                bundle_id, future = pending.pop(0)
+                yield bundle_id, future.result()
+        finally:
+            for _, future in pending:
+                future.cancel()
+            pool.shutdown(wait=False)
+
+    def _bundle_order(self, bundle_id, members, session=None):
+        session = session or self._reader_session()
         files = {}
         if bundle_id:
             try:
-                files = self.page_files(LIBRARY_PATH + "/" + bundle_id)
+                files = self.page_files(LIBRARY_PATH + "/" + bundle_id, session)
             except NotSignedIn:
                 raise
             except Exception as error:
@@ -575,27 +632,41 @@ class HumbleSite:
             # saying, or a large bundle looks like a stalled run
             logger.info(
                 "{count} item(s) of this bundle are not on its page, reading "
-                "them one at a time".format(count=len(missing))
+                "each from its own".format(count=len(missing))
             )
+
+        def own_page(entry):
+            # Not on the bundle page: ask the item's own page
+            try:
+                return self.page_files(
+                    LIBRARY_PATH + "/content/" + entry["id"],
+                    self._reader_session(),
+                ).get(entry["id"])
+            except NotSignedIn:
+                raise
+            except Exception as error:
+                logger.warning(
+                    "Could not read {title}: {error}".format(
+                        title=entry.get("title"), error=error
+                    )
+                )
+                return None
+
+        if len(missing) > 1 and self.readers > 1:
+            with ThreadPoolExecutor(
+                max_workers=self.readers, thread_name_prefix="hbd-item"
+            ) as pool:
+                read = dict(zip(
+                    (e["id"] for e in missing), pool.map(own_page, missing)
+                ))
+        else:
+            read = {e["id"]: own_page(e) for e in missing}
 
         items = []
         for entry in members:
             found = files.get(entry["id"])
             if not found or not found["downloads"]:
-                # Not on the bundle page: ask the item's own page
-                try:
-                    found = self.page_files(
-                        LIBRARY_PATH + "/content/" + entry["id"]
-                    ).get(entry["id"])
-                except NotSignedIn:
-                    raise
-                except Exception as error:
-                    logger.warning(
-                        "Could not read {title}: {error}".format(
-                            title=entry.get("title"), error=error
-                        )
-                    )
-                    found = None
+                found = read.get(entry["id"])
             if not found or not found["downloads"]:
                 self.empty_entries.append(entry.get("title"))
                 continue

@@ -1,5 +1,6 @@
 import json
 import threading
+import time
 
 import pytest
 
@@ -708,3 +709,104 @@ def test_vault_and_content_signatures_are_cached_apart():
     assert signer.url_for("same", "k", "f.zip") == "https://x/False"
     assert signer.url_for("same", "k", "f.zip", vault=True) == "https://x/True"
     assert calls == [("same", False), ("same", True)]
+
+
+###
+# Reading bundles ahead
+###
+class SlowSite(FakeSite):
+    """Bundle and item pages take a while, and how many are being
+    served at once is recorded"""
+
+    def __init__(self, *args, delay=0.05, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.delay = delay
+        self.busy = 0
+        self.most = 0
+        self._lock = threading.Lock()
+
+    def get(self, url, headers=None, **kwargs):
+        slow = "/home/library/" in url and (headers or {}).get("RSC")
+        if slow:
+            with self._lock:
+                self.busy += 1
+                self.most = max(self.most, self.busy)
+            time.sleep(self.delay)
+        try:
+            return super().get(url, headers=headers, **kwargs)
+        finally:
+            if slow:
+                with self._lock:
+                    self.busy -= 1
+
+
+def many_bundles(count):
+    entries, pages = [], {}
+    for n in range(count):
+        entries.append(entry("e%d" % n, "b%d" % n, "Book %d" % n, "Bundle %d" % n))
+        pages["/home/library/b%d" % n] = bundle_page(
+            "b%d" % n, "Bundle %d" % n,
+            entitlement("e%d" % n, "Book %d" % n, download("k%d" % n, "ebook", struct("f%d.pdf" % n))),
+        )
+    return entries, pages
+
+
+def test_bundle_pages_are_read_several_at_once_and_come_out_in_order():
+    fake = SlowSite(*many_bundles(12))
+    orders = list(HumbleSite(fake, readers=4).orders())
+    assert [bundle_id for bundle_id, _ in orders] == ["b%d" % n for n in range(12)]
+    assert [o["product"]["human_name"] for _, o in orders] == ["Bundle %d" % n for n in range(12)]
+    assert fake.most == 4
+
+
+def test_one_reader_reads_one_at_a_time():
+    fake = SlowSite(*many_bundles(5), delay=0.01)
+    assert len(list(HumbleSite(fake, readers=1).orders())) == 5
+    assert fake.most == 1
+
+
+def test_readers_use_sessions_of_their_own():
+    fake = SlowSite(*many_bundles(8), delay=0.02)
+    made = []
+
+    def factory():
+        made.append(threading.get_ident())
+        return fake
+
+    list(HumbleSite(fake, readers=3, session_factory=factory).orders())
+    assert 1 <= len(made) <= 3
+    assert len(set(made)) == len(made)
+
+
+def test_signing_out_while_reading_ahead_still_stops_the_run():
+    import pytest
+
+    fake = SlowSite(*many_bundles(10), delay=0.01)
+    site = HumbleSite(fake, readers=4)
+    orders = site.orders()
+    next(orders)
+    fake.signed_out = True
+    with pytest.raises(NotSignedIn):
+        list(orders)
+
+
+def test_stopping_early_does_not_read_the_whole_library():
+    fake = SlowSite(*many_bundles(40), delay=0.02)
+    orders = HumbleSite(fake, readers=4).orders()
+    next(orders)
+    orders.close()
+    time.sleep(0.2)
+    assert sum(1 for g in fake.gets if g.startswith("/home/library/b")) <= 4 * 2 + 1
+
+
+def test_items_missing_from_a_bundle_page_are_read_several_at_once():
+    count = 6
+    entries = [entry("e%d" % n, "b1", "Book %d" % n, "B") for n in range(count)]
+    pages = {"/home/library/b1": bundle_page("b1", "B")}
+    for n in range(count):
+        pages["/home/library/content/e%d" % n] = rsc({"userLibraryItem": {"entitlements": {"downloads": [
+            entitlement("e%d" % n, "Book %d" % n, download("k%d" % n, "ebook", struct("f%d.pdf" % n)))]}}})
+    fake = SlowSite(entries, pages)
+    orders = dict(HumbleSite(fake, readers=3).orders())
+    assert [s["human_name"] for s in orders["b1"]["subproducts"]] == ["Book %d" % n for n in range(count)]
+    assert fake.most == 3

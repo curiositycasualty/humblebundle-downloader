@@ -3,6 +3,9 @@
 
 ## 0.5.0
 
+- Bundle pages are read four at a time, ahead of the bundle being checked, each reader with a
+  connection of its own. Bundles are still checked in library order. Items missing from their
+  bundle's page, which are read one request each, are read four at a time too
 - Every run ends by saying how long it took, and how much it downloaded at what average speed:
   `Took 1h 02m 03s, downloading 13.19 GiB at 3.63 MiB/s on average`. Interrupted and failed runs
   say it too

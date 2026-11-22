@@ -1281,7 +1281,9 @@ class DownloadLibrary:
             self.purchase_keys = self._dedupe_keys(self.purchase_keys)
 
         if self.site is None:
-            self.site = HumbleSite(self.session)
+            self.site = HumbleSite(
+                self.session, session_factory=lambda: self._new_session()
+            )
         if self._signer is None:
             self._signer = UrlSigner(self.site)
 
