@@ -405,8 +405,9 @@ checksums, resuming and the cache all apply.
   those lines off; they drop to debug rather than disappearing, so `HBD_LOGLEVEL=DEBUG` still shows
   them. Orders that could not be read are reported either way, since that is a problem rather than
   a choice you made
-- Find supported platforms for the `--platform` flag by visiting your Humble Bundle Library
-  and look under the **Platform** dropdown
+- `--platform` takes the names the site uses for each download: `ebook`, `audio`, `video`,
+  `comedy`, `image`, `windows`, `mac`, `linux`, `android`, `ios`, `asmjs`, `unitywasm` and `other`.
+  Case does not matter, and several can be given: `-p ebook audio`
 - Download select bundles by using the `-k` or `--keys` flag.
   These are the ids at the end of a bundle's page in your library, `/home/library/<id>`. The
   thirteen character purchase keys older versions used do not appear on the rebuilt site.

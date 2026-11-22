@@ -1052,3 +1052,73 @@ def test_the_same_wrong_bytes_twice_stop_the_retries(tmp_path, caplog):
     assert "the same again when downloaded a second time" in caplog.text
     assert len(dl.failed_files) == 1
     assert "b1:two.pdf" not in cache_of(tmp_path)
+
+
+###
+# --platform on the rebuilt site
+###
+def test_platform_keeps_only_the_platforms_asked_for(tmp_path):
+    fake = FakeHumble(*two_bundles())
+    library(tmp_path, fake, jobs=1, platform_include=["EBOOK"]).start()
+    files = files_under(tmp_path / "lib")
+    assert "Bundle Two/Game/game.exe" not in files
+    assert "Bundle One/Book Two/two.pdf" in files
+
+
+def test_platform_windows_keeps_only_the_game(tmp_path):
+    fake = FakeHumble(*two_bundles())
+    library(tmp_path, fake, jobs=1, platform_include=["windows"]).start()
+    assert files_under(tmp_path / "lib") == ["Bundle Two/Game/game.exe"]
+
+
+###
+# The runtime at the end
+###
+def test_human_duration():
+    from humblebundle_downloader.download_library import _human_duration
+
+    assert _human_duration(0.4) == "0s"
+    assert _human_duration(59.6) == "1m 00s"
+    assert _human_duration(245) == "4m 05s"
+    assert _human_duration(3723) == "1h 02m 03s"
+    assert _human_duration(90061) == "25h 01m 01s"
+
+
+def test_the_runtime_is_the_last_thing_said(tmp_path, caplog):
+    import logging
+
+    caplog.set_level(logging.INFO)
+    fake = FakeHumble(*two_bundles())
+    library(tmp_path, fake, jobs=2).start()
+    last = caplog.records[-1].getMessage()
+    total = sum(len(body) for body in BODIES.values())
+    assert last.startswith("Took ")
+    from humblebundle_downloader.download_library import _human_size
+
+    assert ", downloading {0}".format(_human_size(total)) in last
+
+
+def test_a_dry_run_says_how_long_it_took_without_a_download_total(tmp_path, caplog):
+    import logging
+
+    caplog.set_level(logging.INFO)
+    library(tmp_path, FakeHumble(*two_bundles()), dry_run=True).start()
+    last = caplog.records[-1].getMessage()
+    assert last.startswith("Took ") and "downloading" not in last
+
+
+def test_the_runtime_is_said_when_a_run_fails_too(tmp_path, caplog):
+    import logging
+    import pytest
+
+    caplog.set_level(logging.INFO)
+    dl = library(tmp_path, FakeHumble(*two_bundles()), jobs=1)
+
+    def broken():
+        raise KeyboardInterrupt
+        yield
+
+    dl._all_orders = broken
+    with pytest.raises(SystemExit):
+        dl.start()
+    assert caplog.records[-1].getMessage().startswith("Took ")

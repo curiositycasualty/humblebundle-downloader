@@ -3,6 +3,10 @@
 
 ## 0.5.0
 
+- Every run ends by saying how long it took, and how much it downloaded at what average speed:
+  `Took 1h 02m 03s, downloading 13.19 GiB at 3.63 MiB/s on average`. Interrupted and failed runs
+  say it too
+- The README lists the platform names `--platform` takes, as the rebuilt site uses them
 - A listed checksum of an empty file, which Humble gives for some files, is treated as no checksum
   rather than one no download could match. Those files were downloaded again and again until the
   retries ran out, and then reported as failed

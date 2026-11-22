@@ -92,6 +92,18 @@ EMPTY_DIGESTS = frozenset((
 ))
 
 
+def _human_duration(seconds):
+    """1h 02m 03s, 4m 05s or 6s"""
+    seconds = int(round(seconds))
+    hours, rest = divmod(seconds, 3600)
+    minutes, seconds = divmod(rest, 60)
+    if hours:
+        return "{0}h {1:02d}m {2:02d}s".format(hours, minutes, seconds)
+    if minutes:
+        return "{0}m {1:02d}s".format(minutes, seconds)
+    return "{0}s".format(seconds)
+
+
 def _struct_hashes(entry):
     """Checksums the api offers for a file, strongest first.
 
@@ -1244,6 +1256,23 @@ class DownloadLibrary:
         return message
 
     def start(self):
+        began = time.monotonic()
+        try:
+            self._run()
+        finally:
+            # Last, however the run ended: finished, failed or interrupted
+            self._log_runtime(time.monotonic() - began)
+
+    def _log_runtime(self, seconds):
+        line = "Took {0}".format(_human_duration(seconds))
+        moved = self._bytes_moved
+        if moved:
+            line += ", downloading {0}".format(_human_size(moved))
+            if seconds >= 1:
+                line += " at {0}/s on average".format(_human_size(moved / seconds))
+        logger.info(line)
+
+    def _run(self):
         self._check_library_path()
 
         self.cache_file = os.path.join(self.library_path, ".cache.json")
