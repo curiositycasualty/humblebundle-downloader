@@ -1,3 +1,5 @@
+import sys
+
 import pytest
 from humblebundle_downloader.cli import parse_args, resolve_jobs
 
@@ -116,3 +118,25 @@ def test_keys_help_points_at_the_library_page():
     with contextlib.redirect_stdout(out), pytest.raises(SystemExit):
         parse_args(["--help"])
     assert "/home/library/<id>" in " ".join(out.getvalue().split())
+
+
+def test_a_connection_failure_is_one_line(monkeypatch, capsys):
+    import requests
+    from humblebundle_downloader import cli as cli_module
+
+    class Library:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            try:
+                raise OSError("Tunnel connection failed: 403 Forbidden")
+            except OSError as inner:
+                raise requests.exceptions.ConnectionError("Max retries exceeded") from inner
+
+    monkeypatch.setattr("humblebundle_downloader.download_library.DownloadLibrary", Library)
+    monkeypatch.setattr("humblebundle_downloader.tui.can_run", lambda: False)
+    monkeypatch.setattr(sys, "argv", ["hbd", "-l", "x", "-s", "y"])
+    with pytest.raises(SystemExit) as stopped:
+        cli_module.cli()
+    assert stopped.value.code == "Could not reach Humble Bundle: Tunnel connection failed: 403 Forbidden"

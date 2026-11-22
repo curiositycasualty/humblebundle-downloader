@@ -3,6 +3,8 @@ import sys
 import logging
 import argparse
 
+import requests
+
 from .progress_styles import PROGRESS_STYLES, DEFAULT_PROGRESS_STYLE
 
 logger = logging.getLogger(__name__)
@@ -82,7 +84,10 @@ def parse_args(args):
     parser.add_argument(
         "--progress",
         action="store_true",
-        help="Display progress bar for downloads",
+        help=(
+            "No longer needed: progress is always shown when hbd runs in "
+            "a terminal. Accepted so existing commands keep working"
+        ),
     )
     parser.add_argument(
         "--progress-style",
@@ -90,20 +95,9 @@ def parse_args(args):
         default=DEFAULT_PROGRESS_STYLE,
         choices=sorted(PROGRESS_STYLES),
         help=(
-            "Look of the per-file progress bar when downloading in "
-            "parallel (default: {default}). 'train' also runs the little "
-            "train from sl across the screen for the totals".format(
+            "Look of each download's progress bar (default: {default})".format(
                 default=DEFAULT_PROGRESS_STYLE
             )
-        ),
-    )
-    parser.add_argument(
-        "--train-per-download",
-        action="store_true",
-        help=(
-            "With --progress-style train, give every download its own sl "
-            "train, not just the totals. Each takes 8 rows, so it falls "
-            "back to one line per download when the terminal is too short"
         ),
     )
     parser.add_argument(
@@ -157,8 +151,7 @@ def parse_args(args):
         "--no-parallel",
         action="store_true",
         help=(
-            "Download one file at a time. Overrides --jobs, and gets "
-            "you the per-file progress bar back"
+            "Download one file at a time. Overrides --jobs"
         ),
     )
     parser.add_argument(
@@ -259,25 +252,27 @@ def resolve_jobs(cli_args):
     return 1 if cli_args.no_parallel else cli_args.jobs
 
 
-def make_listener(cli_args, jobs):
-    """What shows the run. The engine reports events and this decides
-    how they look"""
+def _connection_reason(error):
+    """The innermost reason a connection failed, which is the useful
+    part of requests' nested messages"""
+    reason = error
+    while reason.__context__ is not None or reason.__cause__ is not None:
+        reason = reason.__cause__ or reason.__context__
+    text = str(reason) or type(reason).__name__
+    return text if len(text) <= 200 else text[:199] + "…"
+
+
+def make_listener(interactive):
+    """What shows the run: the interface when there is a terminal to
+    draw it on, and only log lines when there is not (cron, a pipe, a
+    log file)"""
+    if interactive:
+        from .tui import TuiListener
+
+        return TuiListener()
     from .events import Listener
 
-    if not cli_args.progress:
-        return Listener()
-    from .classic_display import ProgressReporter, SingleBar
-
-    if jobs == 1:
-        return SingleBar()
-    from .auto_jobs import START
-
-    slots = START if isinstance(jobs, str) else jobs
-    return ProgressReporter(
-        slots=slots,
-        style=cli_args.progress_style,
-        big_trains=cli_args.train_per_download,
-    )
+    return Listener()
 
 
 def cli():
@@ -293,6 +288,11 @@ def cli():
 
     from .download_library import DownloadLibrary, LibraryPathError, FAILED_EXIT_CODE
     from .humble_site import SiteError
+
+    from .tui import can_run
+
+    interactive = can_run()
+    listener = make_listener(interactive)
 
     try:
         library = DownloadLibrary(
@@ -316,13 +316,27 @@ def cli():
             verify=not cli_args.no_verify,
             shutdown_grace=cli_args.exit_timeout,
             log_skipped=not cli_args.hide_skipped,
-            listener=make_listener(cli_args, jobs),
+            listener=listener,
         )
-        library.start()
+        if interactive:
+            from . import tui
+
+            tui.run(
+                library,
+                listener,
+                style=cli_args.progress_style,
+            )
+        else:
+            library.start()
     except (LibraryPathError, SiteError) as error:
         # Nothing to retry and nothing to show a traceback for: the
         # path is wrong, or the site said no, and the message says how
         sys.exit(str(error))
+    except requests.exceptions.ConnectionError as error:
+        # No network, a proxy in the way, or Humble is down: the
+        # traceback says nothing the one line does not
+        sys.exit("Could not reach Humble Bundle: {0}".format(
+            _connection_reason(error)))
 
     if library.failed_files:
         # Finished, but not everything: say so to whatever ran us

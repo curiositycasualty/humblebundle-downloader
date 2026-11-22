@@ -653,7 +653,12 @@ class DownloadLibrary:
                 # denominator now and can show a bar
                 self.events.traversal_finished()
 
-                self._stop_workers()
+                # A stop asked for from outside gets the same bounded
+                # wait as a Ctrl-C: transfers stop at their next chunk,
+                # and one that will not is left behind
+                self._stop_workers(
+                    timeout=self.shutdown_grace if self._stop.is_set() else None
+                )
 
                 if isinstance(self._fatal, Exception):
                     raise self._fatal

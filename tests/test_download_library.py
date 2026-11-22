@@ -3,14 +3,10 @@ import hashlib
 import os
 
 import queue
-from humblebundle_downloader.progress_styles import (
-    PROGRESS_STYLES,
-    DEFAULT_PROGRESS_STYLE,
-)
+from humblebundle_downloader.progress_styles import PROGRESS_STYLES
 import signal
 import logging
 
-import io
 import re
 
 import pytest
@@ -22,7 +18,6 @@ import datetime
 import json
 import threading
 
-from humblebundle_downloader.classic_display import ProgressReporter, SingleBar
 from humblebundle_downloader.events import Listener
 from humblebundle_downloader.progress_styles import _muncher_bar
 from humblebundle_downloader.download_library import (
@@ -643,169 +638,32 @@ def test_stream_to_file_rejects_a_short_transfer(tmp_path):
         dl._stream_to_file(ChunkedResponse(b"only 6"), str(part), False, 0, 99)
 
 
-###
-# ProgressReporter
-###
-class FakeTTY(io.StringIO):
-    def isatty(self):
-        return True
-
-
-def _reporter(slots=2, tty=True, style="fish"):
-    return ProgressReporter(
-        stream=FakeTTY() if tty else io.StringIO(), slots=slots, style=style
-    )
-
-
-def test_block_has_a_line_per_slot_plus_totals():
-    reporter = _reporter(slots=3)
-    lines = reporter.render(100, 24)
-    assert len(lines) == 4
-    assert lines[-1].startswith("Total")
-
-
-def test_active_transfer_shows_name_and_percentage():
-    reporter = _reporter()
-    reporter.file_started("one.cbz", 1000)
-    reporter.file_progress("one.cbz", 620)
-    block = "\n".join(reporter.render(100, 24))
-    assert "one.cbz" in block
-    assert "62%" in block
-
-
-def test_finished_transfer_frees_its_slot():
-    reporter = _reporter(slots=2)
-    reporter.file_started("one.cbz", 1000)
-    reporter.file_progress("one.cbz", 1000)
-    reporter.file_finished("one.cbz")
-    block = "\n".join(reporter.render(100, 24))
-    assert "one.cbz" not in block
-    assert "Total 1/" in block
-    assert reporter._bytes == 1000
-
-
-def test_slots_are_stable_as_transfers_come_and_go():
-    reporter = _reporter(slots=2)
-    reporter.file_started("first.cbz", 10)
-    reporter.file_started("second.cbz", 10)
-    assert reporter._slot_names == ["first.cbz", "second.cbz"]
-    reporter.file_finished("first.cbz")
-    assert reporter._slot_names == [None, "second.cbz"]
-    reporter.file_started("third.cbz", 10)
-    # Takes the free slot rather than shuffling the other line about
-    assert reporter._slot_names == ["third.cbz", "second.cbz"]
-
-
-def test_totals_show_a_bar_once_the_walk_is_done():
-    reporter = _reporter()
-    for _ in range(4):
-        reporter.file_queued()
-    reporter.file_started("one.cbz", 10)
-    reporter.file_finished("one.cbz")
-
-    assert "so far" in reporter.render(100, 24)[-1]
-    reporter.traversal_finished()
-    totals = reporter.render(100, 24)[-1]
-    assert "so far" not in totals
-    assert "Total 1/4" in totals
-    assert "25%" in totals
-
-
-def test_skipped_files_come_off_the_denominator():
-    reporter = _reporter()
-    for _ in range(5):
-        reporter.file_queued()
-    reporter.file_skipped()
-    reporter.file_skipped()
-    reporter.traversal_finished()
-    assert "Total 0/3" in reporter.render(100, 24)[-1]
-
-
-def test_totals_report_failures():
-    reporter = _reporter()
-    reporter.file_started("bad.bin", 10)
-    reporter.file_finished("bad.bin", ok=False)
-    assert "1 failed" in reporter.render(100, 24)[-1]
-    assert reporter._bytes == 0
-
-
-def test_unknown_size_gets_a_pacing_muncher_and_no_percentage():
-    reporter = _reporter()
-    reporter.file_started("mystery.bin", None)
-    reporter.file_progress("mystery.bin", 2048)
-    line = reporter.render(100, 24)[0]
-    assert "mystery.bin" in line
-    assert "2.00 KiB" in line
-    assert "%" not in line
-
-
-def test_narrow_terminal_falls_back_to_one_line():
-    reporter = _reporter(slots=4)
-    lines = reporter.render(30, 24)
-    assert len(lines) == 1
-    assert "done" in lines[0]
-    assert len(lines[0]) <= 29
-
-
-def test_short_terminal_falls_back_to_one_line():
-    reporter = _reporter(slots=8)
-    assert len(reporter.render(100, 6)) == 1
-
-
-def test_lines_are_never_wider_than_the_terminal():
-    reporter = _reporter(slots=3)
-    for i in range(3):
-        name = "a-really-quite-long-file-name-{0}.cbz".format(i)
-        reporter.file_started(name, 1000)
-        reporter.file_progress(name, 500)
-    for width in (60, 80, 120):
-        for line in reporter.render(width, 24):
-            assert len(line) <= width, (width, len(line), line)
-
-
-def test_reporter_is_disabled_off_a_terminal():
-    reporter = _reporter(tty=False)
-    assert reporter.enabled() is False
-    reporter.start()
-    reporter.paint()
-    reporter.stop()
-    assert reporter.stream.getvalue() == ""
-
-
-def test_paint_then_clear_wipes_the_block():
-    reporter = _reporter(slots=2)
-    reporter.file_started("one.cbz", 1000)
-    reporter.paint()
-    assert reporter._painted == 3
-    assert reporter.stream.getvalue() != ""
-    reporter.clear()
-    assert reporter._painted == 0
-    assert reporter.stream.getvalue().endswith("\033[3A")
-
-
-def test_repaint_moves_back_over_the_previous_block():
-    reporter = _reporter(slots=2)
-    reporter.paint()
-    reporter.stream.truncate(0)
-    reporter.stream.seek(0)
-    reporter.paint()
-    assert reporter.stream.getvalue().startswith("\033[3A")
-
-
 def test_the_cli_picks_the_display():
-    from humblebundle_downloader.cli import make_listener, parse_args
+    from humblebundle_downloader.cli import make_listener
+    from humblebundle_downloader.tui import TuiListener
 
-    def made(*extra):
-        args = parse_args(["-l", "x", "-s", "y"] + list(extra))
-        return make_listener(args, args.jobs if args.jobs else 1)
+    assert type(make_listener(False)) is Listener
+    assert isinstance(make_listener(True), TuiListener)
 
-    assert type(made()) is Listener
-    assert type(made("-j", "4")) is Listener
-    assert isinstance(made("--progress", "-j", "1"), SingleBar)
-    parallel = made("--progress", "-j", "4")
-    assert isinstance(parallel, ProgressReporter)
-    assert parallel.slots == 4
-    assert made("--progress", "-j", "auto").slots == 4
+
+def test_the_interface_needs_a_terminal_on_every_stream():
+    from humblebundle_downloader.tui import can_run
+
+    class Stream:
+        def __init__(self, tty):
+            self.tty = tty
+
+        def isatty(self):
+            return self.tty
+
+    yes, no = Stream(True), Stream(False)
+    env = {"TERM": "xterm-256color"}
+    assert can_run(yes, yes, yes, env)
+    assert not can_run(yes, no, yes, env)       # piped to a file
+    assert not can_run(yes, yes, no, env)       # stderr redirected
+    assert not can_run(no, yes, yes, env)       # run from cron
+    assert not can_run(yes, yes, yes, {"TERM": "dumb"})
+    assert not can_run(yes, yes, yes, {})
 
 
 def test_the_engine_says_nothing_to_a_terminal_itself():
@@ -814,12 +672,7 @@ def test_the_engine_says_nothing_to_a_terminal_itself():
     assert not hasattr(dl, "_progress")
 
 
-def test_every_event_a_display_hears_is_one_the_listener_defines():
-    # The engine only ever calls Listener's methods, so a display that
-    # overrides a name Listener does not have is never spoken to
-    base = {name for name in dir(Listener) if not name.startswith("_")}
-    for display in (ProgressReporter, SingleBar):
-        assert issubclass(display, Listener)
+def test_the_plain_listener_hears_everything_and_prints_output(capsys):
     quiet = Listener()
     quiet.downloads_started(4)
     quiet.jobs_changed(6)
@@ -833,18 +686,8 @@ def test_every_event_a_display_hears_is_one_the_listener_defines():
     quiet.stopping()
     quiet.downloads_finished()
     quiet.run_ending()
-    assert "output" in base and "shows_transfers" in base
-
-
-def test_the_single_bar_draws_then_leaves_its_line():
-    out = io.StringIO()
-    bar = SingleBar(stream=out)
-    bar.file_started("a.cbz", 100)
-    bar.file_progress("a.cbz", 50)
-    bar.file_finished("a.cbz")
-    text = out.getvalue()
-    assert "\t50% [" + "=" * 25 + " " * 25 + "]\r" in text
-    assert text.endswith("\n")
+    quiet.output("https://example/a")
+    assert capsys.readouterr().out == "https://example/a\n"
 
 
 ###
@@ -892,11 +735,6 @@ def test_muncher_copes_with_a_tiny_bar():
     for width in range(0, 6):
         line = _muncher_bar(0.5, width, PROGRESS_STYLES["fish"], 0)
         assert line.startswith("[") and line.endswith("]")
-
-
-def test_unknown_style_name_falls_back_to_the_default():
-    reporter = ProgressReporter(stream=io.StringIO(), style="no-such-style")
-    assert reporter.style is PROGRESS_STYLES[DEFAULT_PROGRESS_STYLE]
 
 
 ###
@@ -1011,23 +849,15 @@ SECOND_PRESS_SCRIPT = r"""
 import sys, threading, time
 sys.path.insert(0, {root!r})
 from humblebundle_downloader.download_library import DownloadLibrary
-from humblebundle_downloader.classic_display import ProgressReporter
-
-class Tty:
-    def isatty(self): return True
-    def write(self, text): pass
-    def flush(self): pass
 
 dl = DownloadLibrary("unused", jobs=2)
-dl._progress = ProgressReporter(stream=Tty(), slots=2)
-dl._progress._painted = 3
 dl._install_interrupt_handler()
 
-# Another thread takes the terminal lock and never lets go, as a worker
-# stuck writing to a wedged terminal would
+# Another thread takes a lock the run needs and never lets go, as a
+# worker wedged in the middle of saving the cache would
 held = threading.Event()
 def hog():
-    dl._progress._term.acquire()
+    dl._cache_lock.acquire()
     held.set()
     threading.Event().wait()
 threading.Thread(target=hog, daemon=True).start()
@@ -1041,7 +871,7 @@ except KeyboardInterrupt:
     print("first press seen", flush=True)
     # Then the main thread gets stuck too, the way a wedged shutdown
     # does, while it holds nothing and waits on everything
-    dl._progress.clear()
+    dl._cache_lock.acquire()
 """
 
 
@@ -1075,30 +905,6 @@ def test_two_presses_kill_the_run_whatever_it_is_stuck_on():
             proc.wait()
     assert code == -signal.SIGINT
     assert "Stopping" in proc.stderr.read()
-
-
-def test_the_display_cannot_hold_up_a_run_that_is_leaving():
-    from humblebundle_downloader.classic_display import ProgressReporter
-
-    class Tty(io.StringIO):
-        def isatty(self):
-            return True
-
-    reporter = ProgressReporter(stream=Tty(), slots=2, interval=0.01)
-    reporter.STOP_WAIT = 0.2
-    reporter.start()
-    held = threading.Event()
-
-    def hog():
-        reporter._term.acquire()
-        held.set()
-        threading.Event().wait()
-
-    threading.Thread(target=hog, daemon=True).start()
-    held.wait()
-    started = time.time()
-    reporter.stop()
-    assert time.time() - started < 2
 
 
 ###
@@ -1696,10 +1502,8 @@ def test_the_cli_offers_the_train(capsys):
 
     args = parse_args(["-l", "x", "-s", "y", "--progress-style", "train"])
     assert args.progress_style == "train"
-    assert args.train_per_download is False
-    args = parse_args(["-l", "x", "-s", "y", "--progress-style", "train",
-                       "--train-per-download"])
-    assert args.train_per_download is True
+    with pytest.raises(SystemExit):
+        parse_args(["-l", "x", "-s", "y", "--train-per-download"])
 
 
 def test_the_light_cycle_leaves_a_wall_of_light():

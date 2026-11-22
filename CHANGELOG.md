@@ -1,6 +1,33 @@
 # Change log
 
 
+## 0.6.0
+
+The interface is new, and the engine underneath no longer draws anything itself.
+
+- Run in a terminal, hbd now shows a live interface (built with Textual) in place of the old
+  progress block: a status line, a row per download in your progress style and in colour, the
+  totals, and a scrolling log. When the run ends the terminal is handed back with the warnings,
+  errors and summary printed in it, and anything meant for stdout. There is nothing to turn on:
+  run in a terminal, you get it. Piped, redirected or run from cron, hbd prints plain log lines as
+  before
+- Ctrl+C (or q) stops tidily, as before; a second press quits at once, after handing the
+  terminal back. A stop from the interface gets the same `--exit-timeout` wait as a Ctrl+C
+- `--progress` is accepted and does nothing, so existing commands keep working. The single
+  `\r` bar for one download at a time is gone with the old display
+- The sl train scenes and `--train-per-download` are removed. The one line `train` style stays
+- A connection that cannot be made (no network, a proxy, Humble down) ends the run with one line
+  saying why, not a traceback
+- For anyone using hbd as a library: `DownloadLibrary` no longer takes `progress_bar`,
+  `progress_style` or `train_per_download`. It takes a `listener` (see `events.py`) and tells it
+  what happens; `request_stop()` and `force_stop()` stop a run from any thread, and a stopped run
+  raises `RunStopped`, a `SystemExit` with status 130
+- Code: the display, the formatting helpers and the run's live state moved out of
+  `download_library.py` into `events.py`, `formatting.py`, `run_state.py`, `rich_bars.py` and
+  `tui.py`
+- New dependencies: rich and textual
+
+
 ## 0.5.0
 
 - Bundle pages are read four at a time, ahead of the bundle being checked, each reader with a

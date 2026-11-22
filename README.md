@@ -17,7 +17,7 @@ After that it will only download the content that has been updated or is missing
 - cli command for easy use (downloading will also work on a headless system)
 - works for SSO and 2FA accounts
 - downloads several files at once, 4 by default, or `-j auto` to find the fastest number _(`--jobs`/`--no-parallel` flags)_
-- optional progress bar for each item downloaded _(`--progress` flag)_
+- a live interface in the terminal: every download in flight, the totals and the log _(automatic; plain log lines when piped, redirected or run from cron)_
 - optional dry run that reports how much there is to download before downloading any of it _(`--dry-run` flag)_
 - optional listing of the url of every file being collected _(`--print-urls` flag)_
 - optional filter by file types using an include _or_ exclude list _(`--include/--exclude` flag)_
@@ -66,7 +66,7 @@ This can be done by getting a browser extension that lets you see or export your
 ### 2. Downloading your library
 
 Use the following command to download your Humble Bundle Library:  
-`hbd --cookie-file cookies.txt --library-path "Downloaded Library" --progress`  
+`hbd --cookie-file cookies.txt --library-path "Downloaded Library"`  
 _If using the docker image, exclude the `hbd` part of the command_
 
 This directory structure will be used:  
@@ -146,61 +146,49 @@ the run ends by saying which number was fastest, which makes a good fixed `-j` f
 `--no-parallel` goes back to one file at a time, and overrides `--jobs`, so it still works when
 `-j` is baked into a shell alias.
 
-`--progress` gives each transfer in flight its own line, repainted in place, with a totals line
-underneath. One reporter thread owns the whole block, so concurrent transfers cannot shred each
-other's output:
+### The interface
 
-```
-Monstress Volume 1.cbz              1.00 MiB 964.52 KiB/s 00:03 [~~~~~~~~~><>········]  51%
-Descender Volume 2.cbz              1.13 MiB 968.39 KiB/s 00:06 [~~~~~~><>···········]  34%
-Black Hammer Omnibus.pdf            1.25 MiB 956.79 KiB/s 00:09 [~~~~><>·············]  20%
-Saga Volume 5.cbz                 898.44 KiB 957.58 KiB/s 00:01 [~~~~~~~~~~~~><>·····]  72%
-Total 4/9                           4.06 MiB   3.74 MiB/s 00:11 [#########-----------]  44%
-```
+Run in a terminal, hbd takes over the screen while it works:
 
-Each line carries the file, its size, current speed, ETA and a muncher eating its way along the
-bar, chomping as it goes. A file whose size the api does not report gets a muncher pacing back and
-forth instead of a percentage. Slots are stable, so a finished transfer leaves its row empty for
-the next one rather than making the other lines jump about. The totals line counts files rather
-than bytes, and only grows a bar once everything has been queued and the denominator is final.
+![hbd mid-run: a status line, four downloads with their bars, the totals, and the log](docs/interface.svg)
 
-`--progress-style` picks the muncher. Most come in from the left as the file starts and leave on the
+- **The status line** says what the run is doing (reading your library, checking bundles,
+  downloading, stopping), how many bundles have been checked, how many downloads run at once, and
+  which bundle is being checked.
+- **A row per download** gives the file, its size, current speed, time left, a bar in your chosen
+  style and the percentage. A file whose size the server does not give gets a muncher pacing back
+  and forth instead. Rows stay put, so a finished download leaves its row empty for the next one
+  rather than making the others jump about. On a narrow screen the time left goes first, then the
+  speed, so the bar and percentage are always there; long names keep their end, which is the part
+  that tells `vol11` from `vol12`.
+- **The totals** count files rather than bytes, and grow a bar once everything has been queued and
+  the number to get through is known.
+- **The log** has everything else: each file as it finishes, with its size, time and average speed
+  (or how far it got if stopped), warnings in yellow and errors in red. Scroll it with the mouse or
+  the keyboard; **End** follows it again.
+
+When the run ends the screen is handed back, and the warnings, errors and the summary are printed
+in the ordinary terminal so they stay in your scrollback. Anything meant for stdout, like
+`--print-urls` and `--print-checksums`, is printed then too.
+
+When hbd is not run in a terminal (piped, redirected to a file, or from cron) there is no interface,
+just the log as plain lines, with no escape codes to clean up afterwards. `--progress`, which used
+to turn the old display on, is still accepted so existing commands and aliases keep working, but it
+does nothing.
+
+`--progress-style` picks the bar. Most come in from the left as the file starts and leave on the
 right as it completes:
 `fish` (the default), `snail`, `cycle`, `train` (into a tunnel), `rocket`, `runner`, `duck`, `car`,
 `comet` and `ufo`. A few travel to something at the end and arrive as it completes: `mouse` (to the
-cheese, which it then eats), `arrow` (into the target) and `worm` (to the apple). `bars` and `blocks` just fill. They live
-in `progress_styles.py`, which is a plain dict with no imports, so adding your own is a two line
-change — the only rule is that every frame of a style has to be the same width, or the bar jitters
-as it animates.
-
-`train` runs each download's little train along its rails into a tunnel at the end of the bar, and
-under the totals runs the little train from [sl](https://github.com/mtoyoda/sl) (the one `sl -l`
-draws) along its own track and into a tunnel as the run completes. `--train-per-download` gives
-every download its own sl train too. That takes eight rows a download, so the display steps down
-as the terminal gets shorter: a train for each download, then for the totals only, then plain rows,
-then a single summary line. The train is turned round to run left to right like the bars.
-
-The sl train is Copyright 1993,1998,2014 Toyoda Masashi (mtoyoda@acm.org), used under sl's licence:
-"Everyone is permitted to do anything on this program including copying, modifying, and improving,
-unless you try to pretend that you wrote it."
-
-Each file also gets a line of its own above the block once it is over, with its size, time and average
-speed, or how far it got if it was stopped:
-
-```
-Downloaded dementia21_vol2.pdf: 310.56 MiB in 76.4s, avg 4.06 MiB/s
-Stopped eastofwest_vol1.cbz at 60% (32.40 MiB of 53.26 MiB) after 9.8s, avg 3.31 MiB/s
-```
-
-Running sequentially (`--no-parallel`) keeps the original per-file bar. The block is only drawn to
-a terminal: piped or redirected output gets the completion lines alone, with no escape sequences to
-clean up afterwards. A terminal too narrow or too short for the block falls back to a single
-summary line automatically.
+cheese, which it then eats), `arrow` (into the target) and `worm` (to the apple). `bars` and `blocks`
+just fill. They live in `progress_styles.py`, which is a plain dict with no imports, so adding your
+own is a few lines. The only rule is that every frame of a style has to be the same width, or the
+bar jitters as it animates. Each style also says what colours its parts are drawn in.
 
 
 ### Stopping a run
 
-**Ctrl+C** asks for a tidy stop. Transfers check between chunks, so they give up promptly rather
+**Ctrl+C** (or **q** in the interface) asks for a tidy stop. Transfers check between chunks, so they give up promptly rather
 than at the end of whatever multi-gigabyte file they happen to be on. Each partly downloaded file
 is kept as `<file>.part`, beside a small `<file>.part.json` noting which version of the file it came
 from, and the next run carries on from there rather than starting again. It asks only for the rest
@@ -208,8 +196,9 @@ from, and the next run carries on from there rather than starting again. It asks
 again from the top. Either way the whole file is checked against its checksum at the end. The cache
 keeps everything already finished, and the run exits with status `130`.
 
-**Ctrl+C again** quits immediately, whatever state anything is in, as the operating system's
-default for a second interrupt rather than anything the downloader does. The `.part.json` is
+**Ctrl+C again** quits immediately, whatever state anything is in. Without the interface that is
+the operating system's default for a second interrupt rather than anything the downloader does;
+with it, the interface hands the terminal back first and then leaves without waiting on anything. The `.part.json` is
 written as each transfer starts, so the partial files this leaves can be carried on from too. The
 cache is saved every few seconds, so this can lose the last few seconds of it; files it forgets are
 complete on disk, and the next run recognises them without downloading them again.

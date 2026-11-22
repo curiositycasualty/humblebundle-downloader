@@ -8,9 +8,8 @@ the animation, one entry per frame, cycled as the display repaints;
 `pellet` is the track ahead of it and `wake` what it leaves behind.
 An optional `end` is drawn at the far end of the track, for the muncher
 to arrive at, `exits` has it carry on off the end so 100% is all wake,
-`enters` has it start off the left so 0% is all track, `eaten` lists what
-is left of the end as the muncher eats it over the last tenth, and `scene` names a full sized picture to draw as well
-when there is room, which only the train has.
+`enters` has it start off the left so 0% is all track, and `eaten` lists
+what is left of the end as the muncher eats it over the last tenth.
 
 `colors` gives Rich styles for the parts of the bar when the terminal
 shows colour: "muncher", "wake", "pellet", "end" and "bracket". Any it
@@ -74,10 +73,7 @@ PROGRESS_STYLES = {
     # A flying saucer, lights blinking, leaving a beam behind it
     "ufo": {"muncher": ("<o>", "<*>"), "pellet": " ", "wake": "'", "exits": True, "enters": True, "colors": {"muncher": "bold green", "wake": "green"}},
     # A little train running along the rails into a tunnel at the end,
-    # couplings stretching and bunching as it chuffs along. With this
-    # style the totals get the full sized train from sl, on its own
-    # track: see sl_train, and --train-per-download to give every
-    # download one
+    # couplings stretching and bunching as it chuffs along
     "train": {
         "muncher": ("[]=[]=[]>", "[]-[]-[]>"),
         "pellet": "═",
@@ -87,7 +83,6 @@ PROGRESS_STYLES = {
         # its mouth
         "enters": True,
         "exits": True,
-        "scene": "sl",
         "colors": {"muncher": "bold bright_white", "wake": "bright_black", "end": "bright_black"},
     },
 }

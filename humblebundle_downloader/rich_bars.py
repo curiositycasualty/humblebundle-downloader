@@ -1,13 +1,11 @@
 """The progress styles as Rich renderables, in colour.
 
-The drawing itself stays in progress_styles and sl_train as plain
-functions of (fraction, width, frame), which is what the tests pin
-down. This only fits them to the width Rich offers and colours them.
+The drawing itself stays in progress_styles as a plain function of
+(fraction, width, frame), which is what the tests pin down. This only fits them to the width Rich offers and colours them.
 """
 from rich.measure import Measurement
 from rich.text import Text
 
-from . import sl_train
 from .progress_styles import (
     DEFAULT_PROGRESS_STYLE,
     PROGRESS_STYLES,
@@ -57,50 +55,3 @@ class PlainBar(MuncherBar):
 
     def __init__(self, fraction, width=None):
         super().__init__(fraction, "bars", 0, width)
-
-
-# Which characters of the sl scene are which, for colouring
-_TUNNEL = set("▗▄▐▓╧")
-_SMOKE = set("@")
-
-
-class TrainScene:
-    """sl's little train on its track, running into the tunnel as the
-    fraction grows. `height` rows tall"""
-
-    # The train, and the track under it
-    height = sl_train.HEIGHT + 1
-
-    def __init__(self, fraction, frame=0, empty=False):
-        self.fraction = fraction
-        self.frame = frame
-        self.empty = empty
-
-    @staticmethod
-    def fits(width):
-        return sl_train.cars_for(width) >= 0
-
-    def lines(self, width):
-        return sl_train.scene(self.fraction, width, self.frame, empty=self.empty)
-
-    def text(self, width):
-        out = Text(no_wrap=True, end="")
-        for row, line in enumerate(self.lines(width)):
-            if row:
-                out.append("\n")
-            for char in line:
-                if char in _TUNNEL:
-                    out.append(char, "grey50")
-                elif char == sl_train.RAIL:
-                    out.append(char, "bright_black")
-                elif char in _SMOKE:
-                    out.append(char, "grey70")
-                else:
-                    out.append(char, "bold bright_white")
-        return out
-
-    def __rich_console__(self, console, options):
-        yield self.text(options.max_width)
-
-    def __rich_measure__(self, console, options):
-        return Measurement(options.max_width, options.max_width)

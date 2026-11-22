@@ -3,14 +3,13 @@ colour, at the width they are given"""
 import pytest
 from rich.console import Console
 
-from humblebundle_downloader import sl_train
 from humblebundle_downloader.progress_styles import (
     PROGRESS_STYLES,
     _muncher_bar,
     muncher_parts,
     style_colors,
 )
-from humblebundle_downloader.rich_bars import MuncherBar, PlainBar, TrainScene
+from humblebundle_downloader.rich_bars import MuncherBar, PlainBar
 
 
 def rendered(renderable, width):
@@ -56,13 +55,3 @@ def test_an_unknown_style_falls_back_to_the_default():
 
 def test_the_totals_bar_is_plain():
     assert PlainBar(0.5).text(12).plain == "[#####-----]"
-
-
-def test_the_train_scene_is_sl_trains_in_colour():
-    width = 100
-    scene = TrainScene(0.6, frame=2)
-    text = scene.text(width)
-    assert text.plain.split("\n") == sl_train.scene(0.6, width, 2)
-    assert len(text.plain.split("\n")) == TrainScene.height
-    assert any(str(span.style) == "grey50" for span in text.spans)
-    assert TrainScene.fits(width) and not TrainScene.fits(10)
