@@ -358,6 +358,9 @@ def run_diagnose(cli_args):
         # A check should answer quickly: one retry, not a run's five
         retries=min(cli_args.retries, 1),
     ).session
+    # Its own retries say nothing the report does not
+    for name in ("urllib3", "urllib3.connectionpool"):
+        logging.getLogger(name).setLevel(logging.ERROR)
     print(diagnose.versions(), flush=True)
     checks = diagnose.run(
         HumbleSite(session), session,

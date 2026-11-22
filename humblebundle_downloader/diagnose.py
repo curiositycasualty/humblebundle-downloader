@@ -148,7 +148,9 @@ def run(site, session, report=None):
             actions.update(site._actions_on(LIBRARY_PATH + "/content/" + entitlement))
         except Exception:
             pass
-    if ok:
+    if not ok:
+        note("Actions", SKIP, "the site did not answer")
+    else:
         wanted = (LIST_ACTION, SIGN_ACTION, VAULT_SIGN_ACTION)
         missing = [name for name in wanted if name not in actions]
         if not missing:
@@ -198,8 +200,12 @@ def run(site, session, report=None):
 
 
 def _short(error):
+    """The innermost reason, which is the useful part of requests'
+    nested messages, without any url's query string"""
     from .logs import redact
 
+    while error.__cause__ is not None or error.__context__ is not None:
+        error = error.__cause__ or error.__context__
     text = redact(str(error) or type(error).__name__)
     return text if len(text) <= 160 else text[:159] + "…"
 
