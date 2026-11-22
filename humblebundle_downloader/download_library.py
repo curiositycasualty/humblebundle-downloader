@@ -580,7 +580,7 @@ class DownloadLibrary:
             except OSError as error:
                 raise LibraryPathError(
                     self._path_problem(shown, error.strerror or error)
-                )
+                ) from error
             logger.info("Created library folder {shown}".format(shown=shown))
             return
 
@@ -683,7 +683,7 @@ class DownloadLibrary:
                 # left behind rather than holding the run open
                 self._stop_workers(timeout=self.shutdown_grace)
                 logger.warning("Interrupted, nothing further was downloaded")
-                raise RunStopped()
+                raise RunStopped() from None
         finally:
             # However the run ends, what it learned is kept
             try:
@@ -1237,7 +1237,7 @@ class DownloadLibrary:
             if sizes and all(sizes):
                 reason += " ({0})".format(", ".join(
                     "{0} {1}".format(entry[2] or entry[1], _human_size(size))
-                    for entry, size in zip(candidates, sizes)
+                    for entry, size in zip(candidates, sizes, strict=True)
                 ))
         else:
             reason = "preferring {wanted}".format(wanted=wanted)
@@ -2179,7 +2179,7 @@ class DownloadLibrary:
                 # start() shut the run down once the workers are joined
                 self._stop.set()
                 if threading.current_thread() is threading.main_thread():
-                    raise RunStopped()
+                    raise RunStopped() from None
 
             result = False
 
@@ -2314,7 +2314,7 @@ class DownloadLibrary:
                             raise RepeatedMismatch(
                                 "{0}, and the same again when downloaded a "
                                 "second time".format(error)
-                            )
+                            ) from error
                         mismatched = error.actual
                         raise
                 return _file_size(part_file), _digest_of(algorithm, hasher)

@@ -239,7 +239,7 @@ def jobs_value(text):
     except ValueError:
         raise argparse.ArgumentTypeError(
             "expected a number or 'auto', not {0!r}".format(text)
-        )
+        ) from None
     if value < 1:
         raise argparse.ArgumentTypeError("must be at least 1")
     return value

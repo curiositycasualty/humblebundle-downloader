@@ -1,11 +1,11 @@
-FROM python:3.10-slim
+FROM python:3.13-slim
 
-RUN pip install poetry
+COPY --from=ghcr.io/astral-sh/uv:0.8 /uv /bin/uv
 
 WORKDIR /app
 
 COPY . .
 
-RUN poetry config virtualenvs.create false && poetry install --only main
+RUN uv pip install --system --no-cache .
 
 ENTRYPOINT ["hbd"]

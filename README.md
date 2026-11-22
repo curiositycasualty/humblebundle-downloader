@@ -38,6 +38,14 @@ After that it will only download the content that has been updated or is missing
 Remember to mount your download directory in the container using dockers `-v` argument.
 `docker run ghcr.io/xtream1101/humblebundle-downloader -h`
 
+Give it `-it` to get the interface; without a terminal it prints plain log lines.
+
+
+### From a clone, with uv
+
+`uv tool install --editable .` installs `hbd` from the clone, and picks up changes to the code as
+you make them. Run it again with `--force` after a change to the dependencies.
+
 
 ## Instructions
 
@@ -401,3 +409,17 @@ checksums, resuming and the cache all apply.
   These are the ids at the end of a bundle's page in your library, `/home/library/<id>`. The
   thirteen character purchase keys older versions used do not appear on the rebuilt site.
   A key given more than once is only used once, so nothing is fetched or downloaded twice.
+
+
+## Development
+
+The project is managed with [uv](https://docs.astral.sh/uv/):
+
+- `uv sync` installs it and its development tools into `.venv`, exactly as `uv.lock` pins them
+- `uv run pytest` runs the tests, `uv run ruff check humblebundle_downloader tests` lints
+- `uv lock --upgrade` moves the pins forward when you want newer dependencies
+
+No test touches the network: `tests/conftest.py` fails any that tries, so the suite never depends
+on Humble being up or on an account being signed in. GitHub Actions runs the lint and the tests on
+Linux and macOS, on the oldest and newest Python supported, for every push and pull request.
+

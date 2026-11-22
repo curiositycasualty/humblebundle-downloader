@@ -7,6 +7,7 @@ import threading
 
 import pytest
 
+from humblebundle_downloader.events import Listener
 from humblebundle_downloader.download_library import (
     DownloadLibrary,
     _looks_like_cookie_header,
@@ -800,7 +801,7 @@ def report_rows(tmp_path):
     path = tmp_path / "lib" / ".hbd-smaller-than-listed.tsv"
     if not path.exists():
         return None
-    return [l.split("\t") for l in path.read_text().splitlines() if not l.startswith("#")]
+    return [line.split("\t") for line in path.read_text().splitlines() if not line.startswith("#")]
 
 
 def test_an_original_on_disk_is_not_overwritten_by_a_much_smaller_file(tmp_path, caplog):
@@ -1127,10 +1128,9 @@ def test_the_runtime_is_said_when_a_run_fails_too(tmp_path, caplog):
 ###
 # Stopping from outside, as the interface does, and the events heard
 ###
-from humblebundle_downloader.events import Listener as _Listener
 
 
-class Recorder(_Listener):
+class Recorder(Listener):
     def __init__(self, stop_on=None):
         super().__init__()
         self.heard = []

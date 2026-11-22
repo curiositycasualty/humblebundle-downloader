@@ -43,7 +43,7 @@ def test_being_throttled_halves_it_at_once():
     assert limit == 5
     assert "slow down" in reason
     # and it does not climb straight back
-    assert [l for l, _ in feed(tuner, 50, 50, 50)] == [5, 5, 5]
+    assert [limit for limit, _ in feed(tuner, 50, 50, 50)] == [5, 5, 5]
 
 
 def test_a_starved_measurement_teaches_it_nothing():
@@ -55,7 +55,7 @@ def test_a_starved_measurement_teaches_it_nothing():
 
 def test_it_stops_at_the_top_and_bottom():
     tuner = JobTuner(start=14, maximum=16, step=2, gain=1.0, hold=1)
-    limits = [l for l, _ in feed(tuner, 10, 20, 30, 40)]
+    limits = [limit for limit, _ in feed(tuner, 10, 20, 30, 40)]
     assert max(limits) == 16
     low = JobTuner(start=1, minimum=1)
     for _ in range(5):

@@ -657,7 +657,8 @@ class HumbleSite:
                 max_workers=self.readers, thread_name_prefix="hbd-item"
             ) as pool:
                 read = dict(zip(
-                    (e["id"] for e in missing), pool.map(own_page, missing)
+                    (e["id"] for e in missing), pool.map(own_page, missing),
+                    strict=True,
                 ))
         else:
             read = {e["id"]: own_page(e) for e in missing}

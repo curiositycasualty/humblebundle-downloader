@@ -140,3 +140,11 @@ def test_a_connection_failure_is_one_line(monkeypatch, capsys):
     with pytest.raises(SystemExit) as stopped:
         cli_module.cli()
     assert stopped.value.code == "Could not reach Humble Bundle: Tunnel connection failed: 403 Forbidden"
+
+
+def test_tests_cannot_reach_the_network():
+    import requests
+    from tests.conftest import NetworkUsed
+
+    with pytest.raises((NetworkUsed, requests.exceptions.ConnectionError)):
+        requests.get("https://www.humblebundle.com/", timeout=2)

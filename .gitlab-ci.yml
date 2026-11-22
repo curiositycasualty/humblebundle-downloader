@@ -1,4 +1,4 @@
-image: python:3.10
+image: python:3.13
 
 stages:
   - package
@@ -10,11 +10,9 @@ pypi-package:
   only:
     - tags
   script:
-    - apt-get update -y && apt-get install -y curl
-    - curl -sSL https://install.python-poetry.org | python3 -
-    - export PATH="/root/.local/bin:$PATH"
-    - poetry build
-    - poetry publish
+    - pip install uv
+    - uv build
+    - uv publish
 
 .write_permission: &write_permission |
     git config --global user.email "gitlab-ci"; git config --global user.name "gitlab-ci"

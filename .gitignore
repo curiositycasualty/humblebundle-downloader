@@ -3,3 +3,6 @@ __pycache__
 *cookies.txt
 .tox/
 .ruff_cache/
+.venv/
+dist/
+.pytest_cache/
