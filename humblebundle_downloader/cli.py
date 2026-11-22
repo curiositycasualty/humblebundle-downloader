@@ -18,7 +18,7 @@ logging.basicConfig(
 logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
 
 
-def parse_args(args):
+def parse_args(args, environ=None):
     if len(args) > 0 and args[0].lower() == "download":
         args = args[1:]
         raise DeprecationWarning("`download` argument is no longer used")
@@ -255,12 +255,60 @@ def parse_args(args):
         ),
     )
 
+    parser.add_argument(
+        "--config",
+        metavar="PATH",
+        help=(
+            "Settings file to read defaults from (default: "
+            "~/.config/hbd/config.toml, or $HBD_CONFIG). Anything on the "
+            "command line wins"
+        ),
+    )
+    parser.add_argument(
+        "--no-config",
+        action="store_true",
+        help="Ignore the settings file",
+    )
+
+    settings, path = _config_defaults(parser, args, environ)
+    parser.set_defaults(**settings)
     parsed = parser.parse_args(args)
+    parsed.config_used = path if settings else None
+    parsed.config_has_cookie = "session_auth" in settings
     if not parsed.verify and not (parsed.cookie_file or parsed.session_auth):
         parser.error("one of the arguments -c/--cookie-file -s/--session-auth is required")
     if not parsed.library_path and not parsed.diagnose:
         parser.error("the following arguments are required: -l/--library-path")
     return parsed
+
+
+def _config_defaults(parser, args, environ):
+    """(defaults from the settings file, its path)"""
+    from . import config
+
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--config")
+    pre.add_argument("--no-config", action="store_true")
+    known, _ = pre.parse_known_args(args)
+    if known.no_config:
+        return {}, None
+    path = os.path.expanduser(known.config) if known.config else config.default_path(environ)
+    if not path:
+        return {}, None
+    if known.config and not os.path.isfile(path):
+        parser.error("no settings file at {0}".format(path))
+    try:
+        settings = config.defaults(parser, config.load(path), path)
+    except config.ConfigError as error:
+        parser.error(str(error))
+    # A cookie given on the command line replaces the file's, of either kind
+    if any(a in ("-c", "-s") or a.startswith(("--cookie-file", "--session-auth", "-c=", "-s="))
+           for a in args):
+        settings.pop("cookie_file", None)
+        settings.pop("session_auth", None)
+    if "cookie_file" in settings and "session_auth" in settings:
+        parser.error("{0}: set cookie-file or session-auth, not both".format(path))
+    return settings, path
 
 
 def jobs_value(text):
@@ -432,6 +480,17 @@ def cli():
 
     if cli_args.exit_timeout is not None and cli_args.exit_timeout < 0:
         sys.exit("--exit-timeout cannot be negative")
+
+    if cli_args.config_used:
+        logger.info("Settings from {0}".format(cli_args.config_used))
+        if cli_args.config_has_cookie:
+            from .config import readable_by_others
+
+            if readable_by_others(cli_args.config_used):
+                logger.warning(
+                    "{0} holds your Humble cookie and other users on this "
+                    "computer can read it: chmod 600 it".format(cli_args.config_used)
+                )
 
     if cli_args.verify:
         sys.exit(run_verify(cli_args.library_path))

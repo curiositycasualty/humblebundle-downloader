@@ -259,6 +259,7 @@ dependencies = [
     { name = "requests" },
     { name = "rich" },
     { name = "textual" },
+    { name = "tomli", marker = "python_full_version < '3.11'" },
 ]
 
 [package.dev-dependencies]
@@ -273,6 +274,7 @@ requires-dist = [
     { name = "requests", specifier = ">=2.32.3" },
     { name = "rich", specifier = ">=14.0" },
     { name = "textual", specifier = ">=8.0" },
+    { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0" },
 ]
 
 [package.metadata.requires-dev]

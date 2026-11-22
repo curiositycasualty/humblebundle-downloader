@@ -41,7 +41,11 @@ The interface is new, and the engine underneath no longer draws anything itself.
 - `hbd --diagnose` checks each step a run depends on (the site, the cookie, signing in, the
   site's actions, a bundle page, signing a url, the download server) and says which work, in a
   report safe to share
-- New dependencies: rich and textual
+- Settings in `~/.config/hbd/config.toml` (or `HBD_CONFIG`, or `--config`): any long option
+  as a default, with the command line winning. Unknown keys are errors that name them; `--verify`,
+  `--diagnose` and `--dry-run` cannot be set there. A cookie kept there gets a warning if others
+  can read the file
+- New dependencies: rich and textual (and tomli on Python 3.10)
 
 
 ## 0.5.0

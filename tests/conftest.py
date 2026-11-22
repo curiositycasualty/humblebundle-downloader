@@ -48,3 +48,9 @@ def no_network(monkeypatch):
     monkeypatch.setattr(socket.socket, "connect", guarded_connect)
     monkeypatch.setattr(socket.socket, "connect_ex", guarded_connect_ex)
     monkeypatch.setattr(socket, "getaddrinfo", guarded_getaddrinfo)
+
+
+@pytest.fixture(autouse=True)
+def no_settings_file(monkeypatch):
+    """Tests never read the settings of whoever runs them"""
+    monkeypatch.setenv("HBD_CONFIG", "")

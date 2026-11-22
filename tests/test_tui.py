@@ -306,8 +306,11 @@ def test_ctrl_c_asks_the_engine_to_stop_and_a_second_quits_now():
     try:
         asyncio.run(drive())
     finally:
-        logging.getLogger().removeHandler(collector)
         library.hold.set()
+        # Let its run finish before the next test starts listening to
+        # the log, or its last lines land in that test's
+        assert wait_for(app.finished.is_set)
+        logging.getLogger().removeHandler(collector)
     assert app.forced
 
 
@@ -405,8 +408,9 @@ def test_the_keys_reach_the_engine():
     try:
         asyncio.run(drive())
     finally:
-        logging.getLogger().removeHandler(collector)
         library.hold.set()
+        assert wait_for(app.finished.is_set)
+        logging.getLogger().removeHandler(collector)
 
 
 def test_changing_jobs_without_workers_says_so():

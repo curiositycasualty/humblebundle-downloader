@@ -47,6 +47,29 @@ Give it `-it` to get the interface; without a terminal it prints plain log lines
 you make them. Run it again with `--force` after a change to the dependencies.
 
 
+### Settings
+
+Anything you pass every time can live in `~/.config/hbd/config.toml` instead, using the long
+option names as keys:
+
+```toml
+library-path = "/Volumes/Books/Humble"
+cookie-file = "~/.config/hbd/cookies.txt"
+jobs = "auto"
+prefer-format = ["cbz", "largest"]
+progress-style = "cycle"
+```
+
+Then `hbd` on its own does the right thing, and anything given on the command line still wins,
+including `-c` or `-s` over the file's cookie. A misspelt key is an error that names it, rather
+than being quietly ignored. `--verify`, `--diagnose` and `--dry-run` cannot be set there: they
+choose what a run does, and a file that silently made every run a dry run would be a trap.
+`--config PATH` (or `HBD_CONFIG`) reads another file, and `--no-config` reads none.
+
+A `session-auth` cookie can go in the file too; hbd warns if other users on the computer could
+read it (`chmod 600 ~/.config/hbd/config.toml` fixes that).
+
+
 ## Instructions
 
 
