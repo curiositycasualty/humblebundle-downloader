@@ -125,6 +125,10 @@ class DownloadLibrary(WalkMixin, SelectionMixin, TransferMixin, CacheMixin):
         self._workers = []
         self._downloads_announced = False
         self._stop = threading.Event()
+        self._paused = threading.Event()
+        # Only ever waited on, for a short sleep that a stop can cut off
+        self._paused_wake = threading.Event()
+        self._skipping = set()
         self._cache_lock = threading.Lock()
         # The cache is written at most every CACHE_FLUSH_SECONDS, and
         # once more when the run ends, rather than after every file
@@ -486,6 +490,67 @@ class DownloadLibrary(WalkMixin, SelectionMixin, TransferMixin, CacheMixin):
         self.events.stopping()
         logger.warning("Stopping. Waiting for downloads in flight")
 
+    # -- live controls, for the interface -----------------------------
+
+    def set_jobs(self, limit):
+        """Download `limit` files at once from now on, starting more
+        workers if there are not enough. Taking over from -j auto stops
+        it changing the number. Returns the number now in force, or None
+        when the run is not downloading in parallel (-j 1, a dry run)"""
+        if self._queue is None:
+            return None
+        limit = max(1, min(auto_jobs.MAXIMUM, int(limit)))
+        if self._tuner_thread is not None:
+            # Set by hand: -j auto no longer has a say
+            self._tuner_stop.set()
+            logger.info("-j auto stopped: the number at once is now set by hand")
+        while len(self._workers) < limit:
+            worker = threading.Thread(target=self._worker, daemon=True)
+            worker.start()
+            self._workers.append(worker)
+        old = self._gate.limit
+        self._gate.set_limit(limit)
+        if limit != old:
+            logger.info("Now downloading {new} at once, was {old}".format(new=limit, old=old))
+            self.events.jobs_changed(limit)
+        return limit
+
+    @property
+    def jobs_now(self):
+        return self._gate.limit
+
+    def pause(self):
+        """Hold every transfer where it is, and start no new ones.
+        Connections may time out while paused; each picks up where it
+        was once resumed, as after any dropped connection"""
+        if not self._paused.is_set():
+            self._paused.set()
+            logger.info("Paused")
+            self.events.paused(True)
+
+    def resume(self):
+        if self._paused.is_set():
+            self._paused.clear()
+            logger.info("Resumed")
+            self.events.paused(False)
+
+    @property
+    def is_paused(self):
+        return self._paused.is_set()
+
+    def skip(self, name):
+        """Give up on the download of `name` (as the interface shows it)
+        for this run. What it has is kept for the next run to carry on
+        from, and it does not count as a failure"""
+        with self._notice_lock:
+            self._skipping.add(name)
+
+    def _wait_while_paused(self, name=None):
+        while self._paused.is_set() and not self._stop.is_set():
+            if name is not None and name in self._skipping:
+                return
+            self._paused_wake.wait(0.2)
+
     def force_stop(self):
         """Leave now, as a second Ctrl-C does"""
         self._hard_exit()
@@ -715,6 +780,8 @@ class DownloadLibrary(WalkMixin, SelectionMixin, TransferMixin, CacheMixin):
                     return
                 if self._stop.is_set():
                     continue
+                # Paused: nothing new starts until resumed
+                self._wait_while_paused()
                 if not self._gate.acquire(self._stop):
                     continue
                 try:

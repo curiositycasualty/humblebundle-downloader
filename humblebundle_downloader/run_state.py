@@ -49,6 +49,8 @@ class Snapshot:
     bundles: int                    # how many have been checked
     phase: str
     stopping: bool = field(default=False)
+    paused: bool = field(default=False)
+    skipped: int = field(default=0)
 
     @property
     def fraction(self):
@@ -82,6 +84,8 @@ class RunState(Listener):
         self._bundles = 0
         self._phase = "Reading your library"
         self._stopping = False
+        self._paused = False
+        self._skipped_by_hand = 0
 
     # -- the run ------------------------------------------------------
 
@@ -101,6 +105,9 @@ class RunState(Listener):
         with self._lock:
             if not self._stopping:
                 self._phase = "Finishing up"
+
+    def paused(self, paused):
+        self._paused = paused
 
     def stopping(self):
         # Called from a signal handler as well: no lock, just a flag
@@ -168,7 +175,7 @@ class RunState(Listener):
             if entry is not None:
                 entry["done"] = downloaded
 
-    def file_finished(self, name, ok=True):
+    def file_finished(self, name, ok=True, skipped=False):
         with self._lock:
             entry = self._files.pop(name, None)
             if name in self._slot_names:
@@ -177,6 +184,8 @@ class RunState(Listener):
                 self._done += 1
                 if entry is not None:
                     self._bytes += entry["done"]
+            elif skipped:
+                self._skipped_by_hand += 1
             else:
                 self._failed += 1
 
@@ -206,7 +215,7 @@ class RunState(Listener):
                 slots=tuple(transfers.get(n) if n else None for n in self._slot_names),
                 done=self._done,
                 failed=self._failed,
-                expected=max(0, self._queued - self._skipped),
+                expected=max(0, self._queued - self._skipped - self._skipped_by_hand),
                 walk_done=self._walk_done,
                 seen=seen,
                 rate=_rate(self._overall),
@@ -214,8 +223,10 @@ class RunState(Listener):
                 jobs=self._jobs,
                 bundle=self._bundle,
                 bundles=self._bundles,
-                phase=self._phase,
+                phase="Paused" if self._paused and not self._stopping else self._phase,
                 stopping=self._stopping,
+                paused=self._paused,
+                skipped=self._skipped_by_hand,
             )
 
 

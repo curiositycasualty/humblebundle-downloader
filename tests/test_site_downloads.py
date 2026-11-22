@@ -1150,7 +1150,7 @@ class Recorder(Listener):
     def file_queued(self): self._note("file_queued")
     def traversal_finished(self): self._note("traversal_finished")
     def file_started(self, name, total): self._note("file_started", name)
-    def file_finished(self, name, ok=True): self._note("file_finished", name, ok)
+    def file_finished(self, name, ok=True, skipped=False): self._note("file_finished", name, ok)
     def stopping(self): self._note("stopping")
     def run_ending(self): self._note("run_ending")
     def output(self, line): self.lines.append(line)
@@ -1274,3 +1274,91 @@ def test_a_single_format_asks_nothing_and_needs_no_threads(tmp_path):
     dl.start()
     assert fake.cdn_gets == []
     assert getattr(dl, "_sizer", None) is None
+
+
+###
+# Live controls: downloads at once, pause, skip
+###
+def test_set_jobs_starts_workers_and_moves_the_gate(tmp_path):
+    dl = library(tmp_path, FakeHumble(*two_bundles()), jobs=2)
+    dl._start_workers()
+    try:
+        assert dl.set_jobs(5) == 5
+        assert len(dl._workers) == 5 and dl.jobs_now == 5
+        assert dl.set_jobs(1) == 1 and len(dl._workers) == 5
+        assert dl.set_jobs(99) == 16
+    finally:
+        dl._stop.set()
+        dl._stop_workers(timeout=2)
+
+
+def test_set_jobs_by_hand_stops_auto(tmp_path):
+    dl = library(tmp_path, FakeHumble(*two_bundles()), jobs="auto")
+    dl._start_workers()
+    try:
+        dl.set_jobs(6)
+        assert dl._tuner_stop.is_set()
+    finally:
+        dl._stop.set()
+        dl._stop_workers(timeout=2)
+
+
+def test_set_jobs_without_workers_says_so(tmp_path):
+    assert library(tmp_path, FakeHumble(*two_bundles()), jobs=1).set_jobs(4) is None
+
+
+class Controller(Recorder):
+    """Pauses, or skips, when a chosen file starts"""
+
+    def __init__(self, action, target):
+        super().__init__()
+        self.action, self.target = action, target
+        self.progress = []
+
+    def file_started(self, name, total):
+        super().file_started(name, total)
+        if name == self.target:
+            getattr(self.library, self.action)(*(() if self.action == "pause" else (name,)))
+
+    def file_progress(self, name, downloaded):
+        self.progress.append((time.time(), name, downloaded))
+
+    def paused(self, paused):
+        self._note("paused", paused)
+
+
+def test_pause_holds_transfers_until_resumed(tmp_path):
+    heard = Controller("pause", "one.pdf")
+    dl = library(tmp_path, FakeHumble(*two_bundles()), jobs=1, listener=heard)
+    heard.library = dl
+    runner = threading.Thread(target=dl.start, daemon=True)
+    runner.start()
+    try:
+        time.sleep(0.5)
+        assert dl.is_paused and runner.is_alive()
+        # Started, so its part file is there, but nothing is finished
+        assert all(f.endswith((".part", ".part.json")) for f in files_under(tmp_path / "lib"))
+    finally:
+        resumed_at = time.time()
+        dl.resume()
+    runner.join(timeout=5)
+    assert not runner.is_alive()
+    assert len(files_under(tmp_path / "lib")) == 4
+    assert all(when >= resumed_at for when, name, done in heard.progress if done > 0)
+    assert ("paused", True) in heard.heard and ("paused", False) in heard.heard
+
+
+def test_skip_gives_up_on_one_file_and_keeps_its_part(tmp_path, caplog):
+    import logging
+
+    caplog.set_level(logging.INFO)
+    heard = Controller("skip", "two.pdf")
+    dl = library(tmp_path, FakeHumble(*two_bundles()), jobs=1, listener=heard)
+    heard.library = dl
+    dl.start()
+    files = files_under(tmp_path / "lib")
+    assert "Bundle One/Book Two/two.pdf" not in files
+    assert len([f for f in files if not f.endswith((".part", ".part.json"))]) == 3
+    assert dl.failed_files == []
+    assert "Skipped two.pdf" in caplog.text
+    assert not dl._skipping

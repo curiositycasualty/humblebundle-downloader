@@ -20,8 +20,10 @@ from rich.console import Group
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.containers import Vertical
+from textual.screen import ModalScreen
 from textual.widget import Widget
-from textual.widgets import Footer, RichLog, Static
+from textual.widgets import Footer, OptionList, RichLog, Static
 
 from .formatting import _fit, _format_clock, _human_size
 from .progress_styles import DEFAULT_PROGRESS_STYLE
@@ -190,6 +192,8 @@ def totals_row(snap, width):
     )
     if snap.failed:
         label += " ({0} failed)".format(snap.failed)
+    if snap.skipped:
+        label += " ({0} skipped)".format(snap.skipped)
     if not snap.walk_done:
         label += " so far"
     fraction = snap.fraction
@@ -260,6 +264,38 @@ class Transfers(Widget):
         )
 
 
+class SkipPicker(ModalScreen):
+    """Which download to skip. Enter picks, Escape changes nothing"""
+
+    DEFAULT_CSS = """
+    SkipPicker { align: center middle; }
+    SkipPicker > Vertical {
+        width: 80%; max-width: 100; height: auto; max-height: 80%;
+        border: round $warning; background: $surface; padding: 0 1;
+    }
+    SkipPicker OptionList { height: auto; max-height: 20; border: none; }
+    """
+    BINDINGS = [Binding("escape", "dismiss_none", "Cancel")]
+
+    def __init__(self, names):
+        super().__init__()
+        self.names = names
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static(
+                "Skip which download? It stops for this run, keeps what it "
+                "has, and the next run carries on from there"
+            )
+            yield OptionList(*self.names)
+
+    def on_option_list_option_selected(self, event):
+        self.dismiss(self.names[event.option_index])
+
+    def action_dismiss_none(self):
+        self.dismiss(None)
+
+
 class HbdApp(App):
     """The interface for one run of a DownloadLibrary"""
 
@@ -273,6 +309,10 @@ class HbdApp(App):
     BINDINGS = [
         Binding("ctrl+c", "stop", "Stop", priority=True),
         Binding("q", "stop", "Stop", show=False),
+        Binding("p", "pause", "Pause/resume"),
+        Binding("s", "skip", "Skip a download"),
+        Binding("plus,equals_sign", "more", "More at once", key_display="+"),
+        Binding("minus", "fewer", "Fewer", key_display="-"),
         Binding("end", "follow", "Follow log"),
     ]
 
@@ -345,6 +385,48 @@ class HbdApp(App):
         # Off the event loop: it logs, and logging is quick, but nothing
         # the engine does should ever hold up the interface
         threading.Thread(target=self.library.request_stop, daemon=True).start()
+
+    def action_pause(self):
+        library = self.library
+        if library.is_paused:
+            library.resume()
+            self.notify("Resumed", timeout=3)
+        else:
+            library.pause()
+            self.notify("Paused. Press p to carry on", timeout=5)
+        self.tick()
+
+    def action_more(self):
+        self._change_jobs(+1)
+
+    def action_fewer(self):
+        self._change_jobs(-1)
+
+    def _change_jobs(self, step):
+        now = self.library.set_jobs(self.library.jobs_now + step)
+        if now is None:
+            self.notify(
+                "This run downloads one file at a time (-j 1, --no-parallel or "
+                "a dry run), so there is nothing to change",
+                severity="warning", timeout=5,
+            )
+        else:
+            self.notify("{0} at once".format(now), timeout=2)
+        self.tick()
+
+    def action_skip(self):
+        snap = self.listener.snapshot()
+        names = [t.name for t in snap.slots if t is not None]
+        if not names:
+            self.notify("Nothing is downloading", timeout=3)
+            return
+
+        def chosen(name):
+            if name:
+                self.library.skip(name)
+                self.notify("Skipping " + name, timeout=4)
+
+        self.push_screen(SkipPicker(names), chosen)
 
     def action_follow(self):
         log = self.query_one("#log", RichLog)

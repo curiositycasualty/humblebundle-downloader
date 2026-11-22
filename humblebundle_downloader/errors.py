@@ -26,6 +26,11 @@ class Interrupted(Exception):
     """
 
 
+class Skipped(Interrupted):
+    """One download was skipped from the interface. Like a stop, it
+    keeps what it has for the next run to carry on from"""
+
+
 class RepeatedMismatch(Exception):
     """A file failed its checksum twice with the same wrong bytes, so it
     is given up on rather than downloaded yet again"""

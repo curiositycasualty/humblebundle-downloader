@@ -34,10 +34,14 @@ class Listener:
         """Downloads are about to begin, up to `slots` at once"""
 
     def jobs_changed(self, limit):
-        """-j auto settled on a new number of downloads at once"""
+        """The number of downloads at once changed, by -j auto or by
+        hand from the interface"""
 
     def downloads_finished(self):
         """Every worker has stopped. The summary is logged after this"""
+
+    def paused(self, paused):
+        """Every transfer was held (True), or let go again (False)"""
 
     def stopping(self):
         """A stop was asked for, by Ctrl-C or the interface.
@@ -72,8 +76,9 @@ class Listener:
     def file_progress(self, name, downloaded):
         """How much of `name` is on disk so far. Called once per chunk"""
 
-    def file_finished(self, name, ok=True):
-        """The transfer of `name` is over, done or not"""
+    def file_finished(self, name, ok=True, skipped=False):
+        """The transfer of `name` is over: done, or not (ok False), and
+        when not, whether it was skipped on purpose"""
 
     # -- what goes to stdout ------------------------------------------
 

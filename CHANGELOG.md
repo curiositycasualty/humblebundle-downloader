@@ -31,6 +31,10 @@ The interface is new, and the engine underneath no longer draws anything itself.
 - An item's formats are sized up at the same time when `-f largest` (or the fallback) has to
   compare them, so an item in four formats costs one round trip rather than four. Every thread
   but the walk's own now has a connection of its own, whatever `-j` is
+- Live controls in the interface: **p** pauses and resumes every download, **s** skips one for
+  this run (keeping what it has, for the next run to carry on from, and not counting it as a
+  failure), and **+** / **-** change how many download at once, starting more workers as needed
+  and taking over from `-j auto`
 - New dependencies: rich and textual
 
 

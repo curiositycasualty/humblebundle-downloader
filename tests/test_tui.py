@@ -208,6 +208,25 @@ class FakeLibrary:
         self.events.stopping()
         self.stop_asked.set()
 
+    # Live controls, noted rather than acted on
+    jobs_now = 2
+    is_paused = False
+
+    def set_jobs(self, limit):
+        self.jobs_now = limit
+        return limit
+
+    def pause(self):
+        self.is_paused = True
+        self.events.paused(True)
+
+    def resume(self):
+        self.is_paused = False
+        self.events.paused(False)
+
+    def skip(self, name):
+        self.skipped = name
+
     def force_stop(self):
         self.forced = True
 
@@ -225,7 +244,8 @@ def info_logging():
 def make_app(library, listener, style="fish"):
     collector = tui.LogCollector(listener)
     logging.getLogger().addHandler(collector)
-    app = tui.HbdApp(library, listener, collector, style=style, fps=50)
+    # Slow enough that the test harness ever sees the app idle
+    app = tui.HbdApp(library, listener, collector, style=style, fps=4)
     return app, collector
 
 
@@ -245,7 +265,7 @@ def test_the_app_shows_the_run_and_closes_when_it_is_over():
 
     async def drive():
         async with app.run_test(size=(100, 30)) as pilot:
-            await pilot.pause(0.2)
+            await pilot.pause(0.6)
             status = app.query_one("#status").render().plain
             assert status.startswith("Checking bundles")
             block = plain(app.query_one("#transfers").render(), 98)
@@ -345,3 +365,78 @@ def test_a_whole_run_downloads_under_the_interface(tmp_path):
     assert app.outcome is None
     assert len(files_under(tmp_path / "lib")) == 4
     assert any(line.startswith("Took ") for _, line in collector.kept)
+
+
+def test_the_keys_reach_the_engine():
+    listener = tui.TuiListener()
+    library = FakeLibrary(listener)
+    app, collector = make_app(library, listener)
+    # Notifications fade out, and the harness waits for every animation
+    notes = []
+    app.notify = lambda message, **kwargs: notes.append(message)
+
+    async def drive():
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("p")
+            await pilot.pause(0.1)
+            assert library.is_paused
+            assert app.query_one("#status").render().plain.startswith("Paused")
+            await pilot.press("p")
+            assert not library.is_paused
+            await pilot.press("plus")
+            await pilot.press("plus")
+            await pilot.press("minus")
+            assert library.jobs_now == 3
+            await pilot.press("s")
+            await pilot.pause(0.1)
+            assert isinstance(app.screen, tui.SkipPicker)
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            assert library.skipped == "one.pdf"
+            assert not isinstance(app.screen, tui.SkipPicker)
+            await pilot.press("s")
+            await pilot.press("escape")
+            await pilot.pause(0.1)
+            assert not isinstance(app.screen, tui.SkipPicker)
+            library.hold.set()
+            await pilot.pause(0.3)
+
+    try:
+        asyncio.run(drive())
+    finally:
+        logging.getLogger().removeHandler(collector)
+        library.hold.set()
+
+
+def test_changing_jobs_without_workers_says_so():
+    listener = tui.TuiListener()
+    library = FakeLibrary(listener)
+    library.set_jobs = lambda limit: None
+    app, collector = make_app(library, listener)
+    notes = []
+    app.notify = lambda message, **kwargs: notes.append(message)
+
+    async def drive():
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause(0.1)
+            await pilot.press("plus")
+            library.hold.set()
+            await pilot.pause(0.3)
+
+    try:
+        asyncio.run(drive())
+    finally:
+        logging.getLogger().removeHandler(collector)
+    assert any("one file at a time" in note for note in notes)
+
+
+def test_skipped_files_show_in_the_totals():
+    state = RunState()
+    state.file_queued()
+    state.file_queued()
+    state.file_started("a", 10)
+    state.file_finished("a", ok=False, skipped=True)
+    snap = state.snapshot()
+    assert snap.skipped == 1 and snap.failed == 0 and snap.expected == 1
+    assert "(1 skipped)" in plain(tui.transfers_block(snap, 100, "fish", 0))[-1]

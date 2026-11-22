@@ -175,6 +175,16 @@ Run in a terminal, hbd takes over the screen while it works:
   (or how far it got if stopped), warnings in yellow and errors in red. Scroll it with the mouse or
   the keyboard; **End** follows it again.
 
+While it runs:
+
+| Key | Does |
+|---|---|
+| **p** | Pause every download, and start no new ones; **p** again carries on. Connections can time out while paused, and each picks up where it was when resumed |
+| **s** | Skip one download: pick it from the list. It stops for this run, keeps what it has, and the next run carries on from there. It does not count as a failure |
+| **+** / **-** | One more, or one fewer, download at once. More workers start when needed; fewer takes effect as downloads finish. Setting it by hand stops `-j auto` changing it. A run with `-j 1`, `--no-parallel` or `--dry-run` downloads one file at a time throughout |
+| **Ctrl+C** or **q** | Stop, tidily; again to quit at once. See [Stopping a run](#stopping-a-run) |
+| **End** | Follow the log again after scrolling back |
+
 When the run ends the screen is handed back, and the warnings, errors and the summary are printed
 in the ordinary terminal so they stay in your scrollback. Anything meant for stdout, like
 `--print-urls` and `--print-checksums`, is printed then too.

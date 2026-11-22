@@ -7,7 +7,7 @@ import os
 import threading
 import time
 
-from .errors import ChecksumMismatch, Interrupted, RepeatedMismatch, RunStopped
+from .errors import ChecksumMismatch, Interrupted, RepeatedMismatch, RunStopped, Skipped
 from .files import (
     _coerce_size,
     _digest_of,
@@ -410,6 +410,10 @@ class TransferMixin:
 
         except (Exception, KeyboardInterrupt) as e:
             stopped = isinstance(e, (Interrupted, KeyboardInterrupt))
+            skipped = isinstance(e, Skipped)
+            if skipped:
+                with self._notice_lock:
+                    self._skipping.discard(label)
             if isinstance(e, Interrupted):
                 # Asked to stop, so this is not a failure worth shouting,
                 # but how far it got and how fast is worth a line
@@ -422,6 +426,7 @@ class TransferMixin:
                     ),
                     stopped=True,
                     resumable=os.path.exists(_resume_note(part_file)),
+                    verb="Skipped" if skipped else "Stopped",
                 )
             else:
                 logger.error(
@@ -431,7 +436,7 @@ class TransferMixin:
                 )
                 self._record_failure(local_filename, str(e) or type(e).__name__)
 
-            self.events.file_finished(label, ok=False)
+            self.events.file_finished(label, ok=False, skipped=skipped)
 
             # A stopped transfer keeps what it has, for the next run to
             # carry on from. A failed one is thrown away: what it holds
@@ -473,7 +478,7 @@ class TransferMixin:
         return result
 
     def _log_finished(self, local_filename, done, elapsed, total=None,
-                      stopped=False, resumable=False):
+                      stopped=False, resumable=False, verb="Stopped"):
         """One line per file once it is over: how much, how long, and how
         fast on average, whether it finished or was stopped part way.
         The progress block, when there is one, keeps it above itself
@@ -488,8 +493,9 @@ class TransferMixin:
             )
         elif total:
             line = (
-                "Stopped {name} at {pct}% ({done} of {total}) after "
+                "{verb} {name} at {pct}% ({done} of {total}) after "
                 "{elapsed:.1f}s{speed}".format(
+                    verb=verb,
                     name=name,
                     pct=int(100 * min(1.0, done / total)),
                     done=_human_size(done),
@@ -499,8 +505,8 @@ class TransferMixin:
                 )
             )
         else:
-            line = "Stopped {name} after {done} in {elapsed:.1f}s{speed}".format(
-                name=name, done=_human_size(done), elapsed=elapsed, speed=speed
+            line = "{verb} {name} after {done} in {elapsed:.1f}s{speed}".format(
+                verb=verb, name=name, done=_human_size(done), elapsed=elapsed, speed=speed
             )
         if stopped and resumable and done:
             line += "; the next run carries on from there"
@@ -849,10 +855,14 @@ class TransferMixin:
         written = already
         with open(part_file, "ab" if append else "wb") as outfile:
             for data in response.iter_content(chunk_size=4096):
+                if self._paused.is_set():
+                    self._wait_while_paused(label)
                 if self._stop.is_set():
                     # Checked between chunks so a Ctrl-C stops a large
                     # transfer promptly instead of at the end of it
                     raise Interrupted()
+                if label is not None and label in self._skipping:
+                    raise Skipped()
                 written += len(data)
                 outfile.write(data)
                 self._count_bytes(len(data))
