@@ -50,6 +50,16 @@ def parse_args(args):
         help="Folder to download all content to",
     )
     parser.add_argument(
+        "--diagnose",
+        action="store_true",
+        help=(
+            "Download nothing: check each step hbd relies on (reaching "
+            "Humble, the cookie, the site's actions, a bundle page, a "
+            "signed url, the download server) and say which work. Safe to "
+            "share: it never shows cookie values, keys or download urls"
+        ),
+    )
+    parser.add_argument(
         "--verify",
         action="store_true",
         help=(
@@ -248,7 +258,7 @@ def parse_args(args):
     parsed = parser.parse_args(args)
     if not parsed.verify and not (parsed.cookie_file or parsed.session_auth):
         parser.error("one of the arguments -c/--cookie-file -s/--session-auth is required")
-    if not parsed.library_path:
+    if not parsed.library_path and not parsed.diagnose:
         parser.error("the following arguments are required: -l/--library-path")
     return parsed
 
@@ -283,6 +293,34 @@ def _connection_reason(error):
         reason = reason.__cause__ or reason.__context__
     text = str(reason) or type(reason).__name__
     return text if len(text) <= 200 else text[:199] + "…"
+
+
+def run_diagnose(cli_args):
+    """hbd --diagnose. Prints the report to stdout and returns the exit
+    status: 1 when any step failed"""
+    from . import diagnose
+    from .download_library import DownloadLibrary
+    from .humble_site import HumbleSite
+
+    # The same cookie handling a run uses, so this tests what a run sends
+    session = DownloadLibrary(
+        cli_args.library_path or os.getcwd(),
+        cookie_path=cli_args.cookie_file,
+        cookie_auth=cli_args.session_auth,
+        # A check should answer quickly: one retry, not a run's five
+        retries=min(cli_args.retries, 1),
+    ).session
+    print(diagnose.versions(), flush=True)
+    checks = diagnose.run(
+        HumbleSite(session), session,
+        report=lambda check: print(diagnose.format_check(check), flush=True),
+    )
+    failed = [c for c in checks if c.status == diagnose.FAIL]
+    if failed:
+        print("\n{0} of {1} checks failed.".format(len(failed), len(checks)))
+    else:
+        print("\nEverything hbd needs from Humble is working.")
+    return 1 if failed else 0
 
 
 def run_verify(library_path):
@@ -397,6 +435,8 @@ def cli():
 
     if cli_args.verify:
         sys.exit(run_verify(cli_args.library_path))
+    if cli_args.diagnose:
+        sys.exit(run_diagnose(cli_args))
 
     jobs = resolve_jobs(cli_args)
 

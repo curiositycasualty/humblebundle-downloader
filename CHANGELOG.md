@@ -38,6 +38,9 @@ The interface is new, and the engine underneath no longer draws anything itself.
 - `hbd -l <library> --verify` checks every file against the checksum recorded when it was
   downloaded, offline and without a cookie, and lists anything changed or missing. Downloads now
   record their path in the library, and a sha1 even when Humble lists no checksum
+- `hbd --diagnose` checks each step a run depends on (the site, the cookie, signing in, the
+  site's actions, a bundle page, signing a url, the download server) and says which work, in a
+  report safe to share
 - New dependencies: rich and textual
 
 

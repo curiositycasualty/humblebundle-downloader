@@ -326,6 +326,28 @@ cd "<library>" && shasum -c ../SHA1SUMS
 Files Humble has since replaced will not match their listing, for the reason above.
 
 
+### When something stops working
+
+`hbd --session-auth "<cookie>" --diagnose` downloads nothing. It checks each step a run depends
+on, in order, and says which work:
+
+```
+hbd 0.6.0 · Python 3.13.1 on Darwin · requests 2.32.5 · textual 8.2.8
+✓ Site: www.humblebundle.com answered http 200
+✓ Cookies: _simpleauth_sess
+✓ Signed in: the library lists 5,809 entries; the first 50: 41 download_drm_free, 9 steam
+✓ Bundle page: 12 items with files, 31 files; file fields: fileSize, md5, name, sha1, url
+✓ Actions: found all three: filterUserLibrary, getSignedUrlsForEntitlements, getVaultSignedUrls
+✓ Signing: 3 urls signed, on cdn.humble.com, good until 2026-11-23 14:02
+✓ Download server: http 200, 53.26 MiB, resumable: bytes
+```
+
+A step that fails says why, and the steps that depend on it are skipped, so the first ✗ is where
+to look: an expired cookie fails at "Signed in", a site change at "Actions" or "Bundle page". The
+report is safe to paste into an issue or a chat: it names cookies but never shows their values,
+and gives counts and field names rather than bundle ids, keys or download urls. It needs no
+library path, and exits `1` if anything failed.
+
 ### Verifying the library
 
 `hbd --library-path "Downloaded Library" --verify` downloads nothing. It hashes every file in the

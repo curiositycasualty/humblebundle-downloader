@@ -422,6 +422,45 @@ class HumbleSite:
         )
         return found
 
+    def list_page(self, page=1, limit=None):
+        """One page of the library listing, as the site gives it: a dict
+        with "results" and "pagination". Raises NotSignedIn or SiteError
+        rather than handing back an empty page that only looks fine"""
+        limit = self.page_size if limit is None else limit
+        fields = {
+            "requestId": str(page),
+            "query": "",
+            "sort": "mostRecent",
+            "cursor": str((page - 1) * limit),
+            "page": str(page),
+            "limit": str(limit),
+            "hideRevealed": "false",
+            "hideExpired": "false",
+            "dateExpires": "",
+        }
+        # The action is (previous state, form data): "$K1" points at
+        # the form fields, which carry the _1_ prefix
+        files = [("_1_" + name, (None, value)) for name, value in fields.items()]
+        files.append(("0", (None, json.dumps([{}, "$K1"]))))
+        value = self._call(LIST_ACTION, LIBRARY_PATH, files=files)
+
+        if isinstance(value, dict) and (
+            value.get("success") is False or value.get("error")
+        ):
+            # Signed out gets a 200 and an empty library, with the
+            # reason alongside. Taking that at face value would look
+            # like a successful run that found nothing to do
+            if value.get("error") == "not_authenticated":
+                raise NotSignedIn(self._not_signed_in_message())
+            raise SiteError(
+                "Humble would not list the library ({error})".format(
+                    error=value.get("error") or "no reason given"
+                )
+            )
+        if not isinstance(value, dict) or not isinstance(value.get("results"), list):
+            raise SiteError("The library listing came back without results")
+        return value
+
     def library(self):
         """Every entry in the library, a page of a thousand at a time"""
         entries = []
@@ -429,41 +468,8 @@ class HumbleSite:
         page = 1
         pages = 1
         while page <= pages:
-            fields = {
-                "requestId": str(page),
-                "query": "",
-                "sort": "mostRecent",
-                "cursor": str((page - 1) * self.page_size),
-                "page": str(page),
-                "limit": str(self.page_size),
-                "hideRevealed": "false",
-                "hideExpired": "false",
-                "dateExpires": "",
-            }
-            # The action is (previous state, form data): "$K1" points at
-            # the form fields, which carry the _1_ prefix
-            files = [("_1_" + name, (None, value)) for name, value in fields.items()]
-            files.append(("0", (None, json.dumps([{}, "$K1"]))))
-            value = self._call(LIST_ACTION, LIBRARY_PATH, files=files)
-
-            if isinstance(value, dict) and (
-                value.get("success") is False or value.get("error")
-            ):
-                # Signed out gets a 200 and an empty library, with the
-                # reason alongside. Taking that at face value would look
-                # like a successful run that found nothing to do
-                if value.get("error") == "not_authenticated":
-                    raise NotSignedIn(self._not_signed_in_message())
-                raise SiteError(
-                    "Humble would not list the library ({error})".format(
-                        error=value.get("error") or "no reason given"
-                    )
-                )
-
-            results = value.get("results") if isinstance(value, dict) else None
-            if not isinstance(results, list):
-                raise SiteError("The library listing came back without results")
-            for entry in results:
+            value = self.list_page(page)
+            for entry in value["results"]:
                 if isinstance(entry, dict) and entry.get("id") not in seen:
                     seen.add(entry.get("id"))
                     entries.append(entry)
