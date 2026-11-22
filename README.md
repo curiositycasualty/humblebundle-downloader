@@ -326,6 +326,19 @@ cd "<library>" && shasum -c ../SHA1SUMS
 Files Humble has since replaced will not match their listing, for the reason above.
 
 
+### Verifying the library
+
+`hbd --library-path "Downloaded Library" --verify` downloads nothing. It hashes every file in the
+library and compares it with the checksum the cache recorded when it was downloaded, then lists
+anything that changed (a damaged drive, an edit, a file replaced by hand) or that the cache says
+should be there and is not. It needs no cookie and makes no requests, so it works offline, and
+it exits `1` when it found anything, for scripts.
+
+Downloads record where they went and their checksum from 0.6.0 on, even when Humble lists none.
+Files from before that are matched by name instead, and files hbd never downloaded (or found
+already on disk, at the right size, the first time it saw them) have no checksum to check and are
+counted separately. The full list goes to `.hbd-logs/verify-<date>.tsv` in the library.
+
 ### 7. Picking one format per item
 
 Bundles usually ship the same book or comic several times over: `.cbz`, `.epub`, `.pdf` and `.mobi`

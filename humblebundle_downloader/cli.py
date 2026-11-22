@@ -25,7 +25,9 @@ def parse_args(args):
 
     parser = argparse.ArgumentParser()
 
-    cookie = parser.add_mutually_exclusive_group(required=True)
+    # Required unless --verify, which reads only the library: checked
+    # after parsing
+    cookie = parser.add_mutually_exclusive_group()
     cookie.add_argument(
         "-c",
         "--cookie-file",
@@ -46,7 +48,15 @@ def parse_args(args):
         "--library-path",
         type=str,
         help="Folder to download all content to",
-        required=True,
+    )
+    parser.add_argument(
+        "--verify",
+        action="store_true",
+        help=(
+            "Download nothing: check every file in the library against the "
+            "checksum recorded when it was downloaded, and list any that "
+            "changed or went missing. Needs no cookie"
+        ),
     )
     parser.add_argument(
         "--vault",
@@ -235,7 +245,12 @@ def parse_args(args):
         ),
     )
 
-    return parser.parse_args(args)
+    parsed = parser.parse_args(args)
+    if not parsed.verify and not (parsed.cookie_file or parsed.session_auth):
+        parser.error("one of the arguments -c/--cookie-file -s/--session-auth is required")
+    if not parsed.library_path:
+        parser.error("the following arguments are required: -l/--library-path")
+    return parsed
 
 
 def jobs_value(text):
@@ -268,6 +283,62 @@ def _connection_reason(error):
         reason = reason.__cause__ or reason.__context__
     text = str(reason) or type(reason).__name__
     return text if len(text) <= 200 else text[:199] + "…"
+
+
+def run_verify(library_path):
+    """hbd --verify. Returns the exit status: 1 when anything changed or
+    went missing, 0 when everything checked out"""
+    from .formatting import _human_size
+    from .verify import CHANGED, MISSING, OK, UNCHECKED, NothingToVerify, summary, verify_library, write_report
+
+    if not os.path.isdir(library_path):
+        return "No library at {0}".format(library_path)
+    try:
+        if sys.stderr.isatty():
+            from rich.progress import (
+                BarColumn, DownloadColumn, Progress, TextColumn, TimeRemainingColumn, TransferSpeedColumn,
+            )
+
+            with Progress(
+                TextColumn("Verifying"), BarColumn(), DownloadColumn(), TransferSpeedColumn(),
+                TimeRemainingColumn(), transient=True,
+            ) as bar:
+                task = bar.add_task("verify", total=None)
+                results = verify_library(
+                    library_path,
+                    progress=lambda n: bar.advance(task, n),
+                    planned=lambda files, size: bar.update(task, total=size),
+                )
+        else:
+            results = verify_library(library_path)
+    except NothingToVerify as error:
+        return str(error)
+
+    counts = summary(results)
+    checked = counts[OK] + counts[CHANGED]
+    logger.info(
+        "Checked {checked} files ({size}): {ok} unchanged, {changed} changed, "
+        "{missing} missing, {unchecked} with no checksum recorded".format(
+            checked=checked,
+            size=_human_size(sum(r.size for r in results if r.status in (OK, CHANGED))),
+            ok=counts[OK], changed=counts[CHANGED], missing=counts[MISSING],
+            unchecked=counts[UNCHECKED],
+        )
+    )
+    trouble = [r for r in results if r.status in (CHANGED, MISSING)]
+    for r in trouble[:20]:
+        logger.warning("  {status}: {path}".format(status=r.status, path=r.path))
+    if len(trouble) > 20:
+        logger.warning("  ...and {0} more".format(len(trouble) - 20))
+    if counts[UNCHECKED]:
+        logger.info(
+            "Files with no checksum recorded were downloaded before hbd kept "
+            "one, or were already on disk when it first saw them"
+        )
+    report = write_report(library_path, results)
+    if report:
+        logger.info("The full list is in {0}".format(report))
+    return 1 if trouble else 0
 
 
 def start_run_log(cli_args):
@@ -323,6 +394,9 @@ def cli():
 
     if cli_args.exit_timeout is not None and cli_args.exit_timeout < 0:
         sys.exit("--exit-timeout cannot be negative")
+
+    if cli_args.verify:
+        sys.exit(run_verify(cli_args.library_path))
 
     jobs = resolve_jobs(cli_args)
 

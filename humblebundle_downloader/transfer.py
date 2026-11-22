@@ -464,6 +464,7 @@ class TransferMixin:
                 )
             self.events.file_finished(label, ok=True)
 
+            file_info["path"] = self._library_relpath(local_filename)
             self._update_cache_data(cache_file_key, file_info)
             self._log_finished(local_filename, written, time.time() - started)
             result = True
@@ -513,17 +514,20 @@ class TransferMixin:
         logger.info(line)
 
     def _hash_algorithm(self, hashes):
-        """Strongest checksum the api gave us that we can actually use"""
-        if not self.verify or not hashes:
+        """Strongest checksum the api gave us that we can actually use.
+        With none listed, sha1 anyway: there is nothing to check it
+        against now, but recorded in the cache it lets --verify tell
+        later whether the file on disk is still the one downloaded"""
+        if not self.verify:
             return None
         for name in ("sha1", "md5"):
-            if hashes.get(name):
+            if (hashes or {}).get(name):
                 try:
                     hashlib.new(name)
                 except ValueError:
                     continue
                 return name
-        return None
+        return "sha1"
 
     def _download_to_part(self, response, part_file, remote_file,
                           local_filename, hashes=None, listed_size=None,

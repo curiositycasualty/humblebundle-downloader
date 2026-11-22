@@ -1236,8 +1236,10 @@ def test_strongest_available_algorithm_is_used():
     dl = DownloadLibrary("x")
     assert dl._hash_algorithm({"sha1": "a", "md5": "b"}) == "sha1"
     assert dl._hash_algorithm({"md5": "b"}) == "md5"
-    assert dl._hash_algorithm({}) is None
-    assert dl._hash_algorithm(None) is None
+    # Nothing listed: sha1 anyway, recorded for --verify
+    assert dl._hash_algorithm({}) == "sha1"
+    assert dl._hash_algorithm(None) == "sha1"
+    assert DownloadLibrary("x", verify=False)._hash_algorithm({"sha1": "a"}) is None
 
 
 def test_no_verify_turns_checking_off():

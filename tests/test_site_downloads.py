@@ -299,7 +299,7 @@ def test_files_already_on_disk_are_adopted_not_downloaded(tmp_path):
     assert "one.pdf" not in fetched
     assert "two.pdf" in fetched
     assert wrong.read_bytes() == BODIES["two.pdf"]
-    assert cache_of(tmp_path)["b1:one.pdf"] == {"adopted": True}
+    assert cache_of(tmp_path)["b1:one.pdf"] == {"adopted": True, "path": "Bundle One/Book One/one.pdf"}
     assert dl.adopted_count == 1
 
 
@@ -321,7 +321,7 @@ def test_update_takes_an_adopted_file_as_its_baseline(tmp_path):
     have.parent.mkdir(parents=True)
     have.write_bytes(BODIES["game.exe"])
     library(tmp_path, fake, purchase_keys=["b2"]).start()
-    assert cache_of(tmp_path)["b2:game.exe"] == {"adopted": True}
+    assert cache_of(tmp_path)["b2:game.exe"] == {"adopted": True, "path": "Bundle Two/Game/game.exe"}
 
     library(tmp_path, fake, purchase_keys=["b2"], update=True).start()
     entry_now = cache_of(tmp_path)["b2:game.exe"]
@@ -527,7 +527,7 @@ def test_a_newer_edition_already_on_disk_is_adopted_after_one_head(tmp_path):
     dl = library(tmp_path, fake, jobs=1, purchase_keys=["b1"])
     dl.start()
     assert "two.pdf" not in fake.streamed
-    assert cache_of(tmp_path)["b1:two.pdf"] == {"adopted": True}
+    assert cache_of(tmp_path)["b1:two.pdf"] == {"adopted": True, "path": "Bundle One/Book Two/two.pdf"}
     assert dl.adopted_count == 1
 
 
@@ -813,7 +813,7 @@ def test_an_original_on_disk_is_not_overwritten_by_a_much_smaller_file(tmp_path,
     dl.start()
     assert have.read_bytes() == ORIGINAL
     assert "game.exe" not in fake.streamed
-    assert cache_of(tmp_path)["b2:game.exe"] == {"adopted": True, "kept_larger": len(BODIES["game.exe"])}
+    assert cache_of(tmp_path)["b2:game.exe"] == {"adopted": True, "path": "Bundle Two/Game/game.exe", "kept_larger": len(BODIES["game.exe"])}
     assert "Keeping your game.exe" in caplog.text
     rows = report_rows(tmp_path)
     assert rows == [[os.path.join("Bundle Two", "Game", "game.exe"), "kept",

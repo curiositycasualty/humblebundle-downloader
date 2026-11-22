@@ -35,6 +35,9 @@ The interface is new, and the engine underneath no longer draws anything itself.
   this run (keeping what it has, for the next run to carry on from, and not counting it as a
   failure), and **+** / **-** change how many download at once, starting more workers as needed
   and taking over from `-j auto`
+- `hbd -l <library> --verify` checks every file against the checksum recorded when it was
+  downloaded, offline and without a cookie, and lists anything changed or missing. Downloads now
+  record their path in the library, and a sha1 even when Humble lists no checksum
 - New dependencies: rich and textual
 
 

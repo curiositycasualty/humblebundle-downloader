@@ -136,11 +136,16 @@ class CacheMixin:
             _remove_quietly(local_file + ".part")
             _remove_quietly(_resume_note(local_file + ".part"))
         if self.dry_run is not True:
-            entry = {"adopted": True}
+            entry = {"adopted": True, "path": self._library_relpath(local_file)}
             if kept is not None:
                 entry["kept_larger"] = kept
             self._update_cache_data(cache_file_key, entry)
         return True
+
+    def _library_relpath(self, local_file):
+        """Where a file is in the library, as the cache records it so
+        --verify can find it again: relative, with forward slashes"""
+        return os.path.relpath(local_file, self.library_path).replace(os.sep, "/")
 
     def _load_cache_data(self, cache_file):
         self._clear_stale_cache_temps(cache_file)
