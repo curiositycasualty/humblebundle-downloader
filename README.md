@@ -179,6 +179,12 @@ When the run ends the screen is handed back, and the warnings, errors and the su
 in the ordinary terminal so they stay in your scrollback. Anything meant for stdout, like
 `--print-urls` and `--print-checksums`, is printed then too.
 
+Each run's whole log is also kept in the library, in `.hbd-logs/`, with times and levels: every
+file as it finished, everything skipped and why, every warning. The newest 20 are kept, and the
+run ends by saying where its log is. Dry runs keep none, so they never push out a real run's log,
+and `--no-log-file` turns it off. Download urls carry a token that works for a day, so their query
+strings are taken out of every line logged anywhere; `--print-urls` still prints them whole.
+
 When hbd is not run in a terminal (piped, redirected to a file, or from cron) there is no interface,
 just the log as plain lines, with no escape codes to clean up afterwards. `--progress`, which used
 to turn the old display on, is still accepted so existing commands and aliases keep working, but it

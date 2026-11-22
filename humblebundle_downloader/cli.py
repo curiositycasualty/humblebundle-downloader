@@ -121,6 +121,14 @@ def parse_args(args):
         ),
     )
     parser.add_argument(
+        "--no-log-file",
+        action="store_true",
+        help=(
+            "Do not keep this run's log in the library's .hbd-logs folder "
+            "(by default the newest {0} runs' logs are kept there)".format(20)
+        ),
+    )
+    parser.add_argument(
         "--hide-skipped",
         action="store_true",
         help=(
@@ -262,6 +270,38 @@ def _connection_reason(error):
     return text if len(text) <= 200 else text[:199] + "…"
 
 
+def start_run_log(cli_args):
+    """Keep this run's whole log in the library, and redact urls in
+    every line logged anywhere. Returns what finish_run_log needs"""
+    from .logs import RedactingFilter, open_run_log
+
+    root = logging.getLogger()
+    for handler in root.handlers:
+        handler.addFilter(RedactingFilter())
+    if cli_args.no_log_file or cli_args.dry_run:
+        return None
+    if not os.path.isdir(cli_args.library_path):
+        # Not created here: hbd takes care not to make a library on a
+        # drive that is not mounted, and this must not get round that.
+        # The run creates it, and the next run logs
+        return None
+    handler, path = open_run_log(cli_args.library_path)
+    if handler is None:
+        logger.warning("Not keeping a log of this run: {0}".format(path))
+        return None
+    root.addHandler(handler)
+    return handler, path
+
+
+def finish_run_log(run_log):
+    if run_log is None:
+        return
+    handler, path = run_log
+    logger.info("This run's full log is in {0}".format(path))
+    logging.getLogger().removeHandler(handler)
+    handler.close()
+
+
 def make_listener(interactive):
     """What shows the run: the interface when there is a terminal to
     draw it on, and only log lines when there is not (cron, a pipe, a
@@ -293,6 +333,7 @@ def cli():
 
     interactive = can_run()
     listener = make_listener(interactive)
+    run_log = start_run_log(cli_args)
 
     try:
         library = DownloadLibrary(
@@ -337,6 +378,8 @@ def cli():
         # traceback says nothing the one line does not
         sys.exit("Could not reach Humble Bundle: {0}".format(
             _connection_reason(error)))
+    finally:
+        finish_run_log(run_log)
 
     if library.failed_files:
         # Finished, but not everything: say so to whatever ran us

@@ -25,6 +25,9 @@ The interface is new, and the engine underneath no longer draws anything itself.
 - Code: the display, the formatting helpers and the run's live state moved out of
   `download_library.py` into `events.py`, `formatting.py`, `run_state.py`, `rich_bars.py` and
   `tui.py`
+- Each run keeps its whole log in `<library>/.hbd-logs/`, the newest 20 runs' worth, and says
+  where at the end. Dry runs keep none; `--no-log-file` turns it off. Query strings (download
+  tokens) are taken out of every url in every log line, in the file and on screen
 - New dependencies: rich and textual
 
 

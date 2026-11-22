@@ -26,6 +26,7 @@ from textual.widgets import Footer, RichLog, Static
 from .formatting import _fit, _format_clock, _human_size
 from .progress_styles import DEFAULT_PROGRESS_STYLE
 from .rich_bars import MuncherBar, PlainBar
+from .logs import RedactingFilter
 from .run_state import RunState
 
 # Redraws a second. Enough for the animations to move, little enough
@@ -358,6 +359,7 @@ def run(library, listener, style=DEFAULT_PROGRESS_STYLE, headless=False):
     """
     root = logging.getLogger()
     collector = LogCollector(listener)
+    collector.addFilter(RedactingFilter())
     # The terminal belongs to the interface while it runs: anything
     # that would have gone to it goes into the log pane instead
     displaced = [h for h in root.handlers if _to_terminal(h)]
