@@ -22,9 +22,11 @@ import datetime
 import json
 import threading
 
+from humblebundle_downloader.classic_display import ProgressReporter, SingleBar
+from humblebundle_downloader.events import Listener
+from humblebundle_downloader.progress_styles import _muncher_bar
 from humblebundle_downloader.download_library import (
     DownloadLibrary,
-    NullReporter,
     Interrupted,
     LibraryPathError,
     SHUTDOWN_GRACE,
@@ -35,13 +37,11 @@ from humblebundle_downloader.download_library import (
     _struct_hashes,
     _validator_for,
     _unique_keys,
-    ProgressReporter,
     _coerce_size,
     _file_ext,
     _human_size,
     _content_range_total,
     _order_error,
-    _muncher_bar,
     _retry_after_seconds,
     USER_AGENT,
 )
@@ -389,16 +389,6 @@ def test_jobs_defaults_to_sequential():
 def test_jobs_is_clamped_to_at_least_one():
     assert DownloadLibrary("fake_library_path", jobs=0).jobs == 1
     assert DownloadLibrary("fake_library_path", jobs=-4).jobs == 1
-
-
-def test_progress_bar_is_kept_when_sequential():
-    dl = DownloadLibrary("fake_library_path", progress_bar=True, jobs=1)
-    assert dl._show_bar is True
-
-
-def test_progress_bar_is_dropped_when_parallel():
-    dl = DownloadLibrary("fake_library_path", progress_bar=True, jobs=4)
-    assert dl._show_bar is False
 
 
 def test_session_is_shared_when_sequential():
@@ -802,47 +792,59 @@ def test_repaint_moves_back_over_the_previous_block():
     assert reporter.stream.getvalue().startswith("\033[3A")
 
 
-def test_only_used_for_parallel_runs_with_progress():
-    # There is always a reporter now, so what matters is which one and
-    # whether the per-file bar is drawn instead
-    sequential = DownloadLibrary("x", jobs=1, progress_bar=True)
-    assert isinstance(sequential._progress, NullReporter)
-    assert sequential._show_bar is True
-    assert sequential._show_status is False
+def test_the_cli_picks_the_display():
+    from humblebundle_downloader.cli import make_listener, parse_args
 
-    no_progress = DownloadLibrary("x", jobs=4, progress_bar=False)
-    assert isinstance(no_progress._progress, NullReporter)
-    assert no_progress._show_bar is False
-    assert no_progress._show_status is False
+    def made(*extra):
+        args = parse_args(["-l", "x", "-s", "y"] + list(extra))
+        return make_listener(args, args.jobs if args.jobs else 1)
 
-    parallel = DownloadLibrary("x", jobs=4, progress_bar=True)
-    assert isinstance(parallel._progress, ProgressReporter)
-    assert parallel._progress.slots == 4
-    assert parallel._show_bar is False
-    assert parallel._show_status is True
+    assert type(made()) is Listener
+    assert type(made("-j", "4")) is Listener
+    assert isinstance(made("--progress", "-j", "1"), SingleBar)
+    parallel = made("--progress", "-j", "4")
+    assert isinstance(parallel, ProgressReporter)
+    assert parallel.slots == 4
+    assert made("--progress", "-j", "auto").slots == 4
 
 
-def test_the_null_reporter_answers_every_call_a_real_one_does():
-    real, null = ProgressReporter(stream=io.StringIO()), NullReporter()
-    spoken_to = [
-        name for name in dir(real)
-        if not name.startswith("_") and callable(getattr(real, name))
-    ]
-    missing = [name for name in spoken_to if not hasattr(null, name)]
-    assert missing == [], missing
+def test_the_engine_says_nothing_to_a_terminal_itself():
+    dl = DownloadLibrary("x", jobs=4)
+    assert type(dl.events) is Listener
+    assert not hasattr(dl, "_progress")
 
-    # And saying all of it to the stand-in does nothing and raises nothing
-    null.file_queued()
-    null.traversal_finished()
-    null.file_started("a.cbz", 10)
-    null.file_progress("a.cbz", 5)
-    null.file_finished("a.cbz")
-    null.file_skipped()
-    null.start()
-    null.paint()
-    null.clear()
-    null.stop()
-    assert null.enabled() is False
+
+def test_every_event_a_display_hears_is_one_the_listener_defines():
+    # The engine only ever calls Listener's methods, so a display that
+    # overrides a name Listener does not have is never spoken to
+    base = {name for name in dir(Listener) if not name.startswith("_")}
+    for display in (ProgressReporter, SingleBar):
+        assert issubclass(display, Listener)
+    quiet = Listener()
+    quiet.downloads_started(4)
+    quiet.jobs_changed(6)
+    quiet.bundle_started("B")
+    quiet.file_queued()
+    quiet.file_skipped()
+    quiet.traversal_finished()
+    quiet.file_started("a.cbz", 10)
+    quiet.file_progress("a.cbz", 5)
+    quiet.file_finished("a.cbz")
+    quiet.stopping()
+    quiet.downloads_finished()
+    quiet.run_ending()
+    assert "output" in base and "shows_transfers" in base
+
+
+def test_the_single_bar_draws_then_leaves_its_line():
+    out = io.StringIO()
+    bar = SingleBar(stream=out)
+    bar.file_started("a.cbz", 100)
+    bar.file_progress("a.cbz", 50)
+    bar.file_finished("a.cbz")
+    text = out.getvalue()
+    assert "\t50% [" + "=" * 25 + " " * 25 + "]\r" in text
+    assert text.endswith("\n")
 
 
 ###
@@ -1008,7 +1010,8 @@ def test_first_interrupt_hands_the_second_to_the_operating_system():
 SECOND_PRESS_SCRIPT = r"""
 import sys, threading, time
 sys.path.insert(0, {root!r})
-from humblebundle_downloader.download_library import DownloadLibrary, ProgressReporter
+from humblebundle_downloader.download_library import DownloadLibrary
+from humblebundle_downloader.classic_display import ProgressReporter
 
 class Tty:
     def isatty(self): return True
@@ -1075,7 +1078,7 @@ def test_two_presses_kill_the_run_whatever_it_is_stuck_on():
 
 
 def test_the_display_cannot_hold_up_a_run_that_is_leaving():
-    from humblebundle_downloader.download_library import ProgressReporter
+    from humblebundle_downloader.classic_display import ProgressReporter
 
     class Tty(io.StringIO):
         def isatty(self):

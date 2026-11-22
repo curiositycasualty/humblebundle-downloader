@@ -1122,3 +1122,81 @@ def test_the_runtime_is_said_when_a_run_fails_too(tmp_path, caplog):
     with pytest.raises(SystemExit):
         dl.start()
     assert caplog.records[-1].getMessage().startswith("Took ")
+
+
+###
+# Stopping from outside, as the interface does, and the events heard
+###
+from humblebundle_downloader.events import Listener as _Listener
+
+
+class Recorder(_Listener):
+    def __init__(self, stop_on=None):
+        super().__init__()
+        self.heard = []
+        self.lines = []
+        self.stop_on = stop_on
+        self.library = None
+        self._lock = threading.Lock()
+
+    def _note(self, *event):
+        with self._lock:
+            self.heard.append(event)
+        if self.stop_on and event[0] == self.stop_on:
+            self.library.request_stop()
+
+    def downloads_started(self, slots): self._note("downloads_started", slots)
+    def downloads_finished(self): self._note("downloads_finished")
+    def bundle_started(self, title): self._note("bundle_started", title)
+    def file_queued(self): self._note("file_queued")
+    def traversal_finished(self): self._note("traversal_finished")
+    def file_started(self, name, total): self._note("file_started", name)
+    def file_finished(self, name, ok=True): self._note("file_finished", name, ok)
+    def stopping(self): self._note("stopping")
+    def run_ending(self): self._note("run_ending")
+    def output(self, line): self.lines.append(line)
+
+
+def test_a_run_tells_its_listener_what_happens(tmp_path):
+    heard = Recorder()
+    library(tmp_path, FakeHumble(*two_bundles()), jobs=2, listener=heard).start()
+    names = [e[0] for e in heard.heard]
+    assert names[0] == "downloads_started" and heard.heard[0][1] == 2
+    assert ("bundle_started", "Bundle One") in heard.heard
+    assert names.count("file_started") == 4
+    assert sorted(e[1] for e in heard.heard if e[0] == "file_finished") == [
+        "game.exe", "one.epub", "one.pdf", "two.pdf"]
+    assert names.index("traversal_finished") < names.index("downloads_finished") < names.index("run_ending")
+
+
+def test_print_urls_goes_through_the_listener(tmp_path):
+    heard = Recorder()
+    library(tmp_path, FakeHumble(*two_bundles()), dry_run=True, print_urls=True, listener=heard).start()
+    assert len(heard.lines) == 4 and all(line.startswith("https://") for line in heard.lines)
+
+
+@pytest.mark.parametrize("jobs", [1, 3])
+def test_request_stop_ends_the_run_tidily(tmp_path, jobs):
+    from humblebundle_downloader.download_library import RunStopped, INTERRUPT_EXIT_CODE
+
+    heard = Recorder(stop_on="file_started")
+    dl = library(tmp_path, FakeHumble(*two_bundles()), jobs=jobs, listener=heard)
+    heard.library = dl
+    with pytest.raises(RunStopped) as stopped:
+        dl.start()
+    assert stopped.value.code == INTERRUPT_EXIT_CODE
+    assert ("stopping",) in heard.heard
+    # Nothing new is begun once asked to stop
+    assert sum(1 for e in heard.heard if e[0] == "file_started") <= jobs
+    assert ("downloads_finished",) in heard.heard
+    # Stopped at their first chunk, so nothing finished
+    assert not any(e[0] == "file_finished" and e[2] for e in heard.heard)
+
+
+def test_request_stop_twice_is_once(tmp_path):
+    heard = Recorder()
+    dl = library(tmp_path, FakeHumble(*two_bundles()), jobs=1, listener=heard)
+    heard.library = dl
+    dl.request_stop()
+    dl.request_stop()
+    assert heard.heard.count(("stopping",)) == 1

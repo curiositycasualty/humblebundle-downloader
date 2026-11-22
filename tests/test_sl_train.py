@@ -3,7 +3,7 @@ import os
 import pytest
 
 from humblebundle_downloader import sl_train
-from humblebundle_downloader.download_library import ProgressReporter
+from humblebundle_downloader.classic_display import ProgressReporter
 
 from .test_progress_screen import TTY
 

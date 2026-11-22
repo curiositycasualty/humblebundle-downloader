@@ -1,13 +1,11 @@
 import os
 import re
-import contextlib
 import sys
 import json
 import time
 import email
 import queue
 import parsel
-import shutil
 import hashlib
 import tempfile
 import signal
@@ -19,10 +17,10 @@ import http.cookiejar
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from .progress_styles import PROGRESS_STYLES, DEFAULT_PROGRESS_STYLE
-from . import sl_train
 from . import auto_jobs
 from .auto_jobs import JobGate, JobTuner
+from .events import Listener
+from .formatting import _human_duration, _human_size
 from .humble_site import HumbleSite, NotSignedIn, SignedUrl, SiteError, UrlSigner
 
 logger = logging.getLogger(__name__)
@@ -52,6 +50,15 @@ CACHE_FLUSH_SECONDS = 5.0
 # Ordinary transfers stop at their next chunk, well inside a second, so
 # this is only ever spent on one stuck somewhere it cannot notice
 SHUTDOWN_GRACE = 300
+
+
+class RunStopped(SystemExit):
+    """The run was asked to stop and has. A SystemExit, with the
+    conventional status for being interrupted, so a caller that does not
+    catch it exits the way a Ctrl-C always has"""
+
+    def __init__(self):
+        super().__init__(INTERRUPT_EXIT_CODE)
 
 
 class Interrupted(Exception):
@@ -90,18 +97,6 @@ EMPTY_DIGESTS = frozenset((
     "da39a3ee5e6b4b0d3255bfef95601890afd80709",             # sha1
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 ))
-
-
-def _human_duration(seconds):
-    """1h 02m 03s, 4m 05s or 6s"""
-    seconds = int(round(seconds))
-    hours, rest = divmod(seconds, 3600)
-    minutes, seconds = divmod(rest, 60)
-    if hours:
-        return "{0}h {1:02d}m {2:02d}s".format(hours, minutes, seconds)
-    if minutes:
-        return "{0}m {1:02d}s".format(minutes, seconds)
-    return "{0}s".format(seconds)
 
 
 def _struct_hashes(entry):
@@ -273,632 +268,6 @@ USER_AGENT = (
 ).format(version=_package_version())
 
 
-def _format_clock(seconds):
-    """mm:ss, or --:-- when there is nothing to go on"""
-    if seconds is None or seconds < 0 or seconds != seconds:
-        return "--:--"
-    seconds = int(seconds)
-    if seconds >= 3600:
-        return "{hours:02d}:{minutes:02d}h".format(
-            hours=seconds // 3600, minutes=(seconds % 3600) // 60
-        )
-    return "{minutes:02d}:{seconds:02d}".format(
-        minutes=seconds // 60, seconds=seconds % 60
-    )
-
-
-def _bar(fraction, width):
-    if width < 3:
-        return ""
-    if fraction is None:
-        return "[" + "?" * width + "]"
-    filled = int(round(max(0.0, min(1.0, fraction)) * width))
-    return "[" + "#" * filled + "-" * (width - filled) + "]"
-
-
-# How far along a style that eats what is at the end gets to it
-EAT_FROM = 0.9
-
-
-def _muncher_bar(fraction, width, style, frame):
-    """A muncher eating its way along the track.
-
-    With no known size it paces back and forth instead of creeping
-    right, so the line still shows something is happening.
-    """
-    frames = style["muncher"]
-    muncher = frames[frame % len(frames)]
-    end = style.get("end", "")
-
-    # A style that eats what is at the end arrives at it a little early
-    # and spends the rest of the way eating it, a stage at a time
-    eaten = style.get("eaten")
-    if eaten and fraction is not None:
-        arrive = EAT_FROM
-        done = max(0.0, min(1.0, fraction))
-        if done > arrive:
-            bites = (done - arrive) / (1.0 - arrive)
-            end = eaten[min(len(eaten) - 1, int(bites * (len(eaten) - 1) + 1e-9))]
-        fraction = min(1.0, done / arrive)
-
-    if len(end) + len(muncher) > width:
-        end = ""
-    width -= len(end)
-    span = max(0, width - len(muncher))
-    if span == 0:
-        return "[" + muncher[:width] + end + "]"
-
-    if fraction is None:
-        # Bounce: 0..span..0
-        cycle = span * 2
-        step = frame % cycle if cycle else 0
-        position = step if step <= span else cycle - step
-        ahead = style["pellet"] * (span - position)
-        behind = style["pellet"] * position
-        return "[" + behind + muncher + ahead + end + "]"
-
-    # Where the muncher's first column goes. A style that enters starts
-    # wholly off the left of the track, and one that exits finishes
-    # wholly off the right; the rest start and stop inside it. Whatever
-    # falls outside the track is not drawn
-    fraction = max(0.0, min(1.0, fraction))
-    first = -len(muncher) if style.get("enters") else 0
-    last = width if style.get("exits") else span
-    position = first + int(round(fraction * (last - first)))
-    if style.get("enters") and fraction > 0:
-        # Under way means in sight, however little of the way
-        position = max(position, first + 1)
-
-    shown = muncher[max(0, -position):]
-    track = style["wake"] * max(0, position) + shown + style["pellet"] * width
-    return "[" + track[:width] + end + "]"
-
-
-def _fit(text, width):
-    """Pad or truncate to exactly `width`, keeping the tail of a name
-    since that is where a file's distinguishing part usually is
-    """
-    if width <= 0:
-        return ""
-    if len(text) <= width:
-        return text.ljust(width)
-    if width <= 3:
-        return text[:width]
-    return "…" + text[-(width - 1):]
-
-
-class NullReporter:
-    """Stands in when nothing is being displayed.
-
-    Every call site used to ask whether there was a reporter before
-    saying anything to it. There is always one now; this is the one
-    that listens and does nothing.
-    """
-
-    slots = 0
-    jobs_note = None
-
-    def enabled(self):
-        return False
-
-    def start(self):
-        pass
-
-    def stop(self):
-        pass
-
-    def clear(self, wait=None):
-        pass
-
-    def paint(self):
-        pass
-
-    def printing(self):
-        return contextlib.nullcontext()
-
-    def attach_logging(self):
-        pass
-
-    def detach_logging(self):
-        pass
-
-    def forget_painted(self):
-        pass
-
-    def render(self, width=80, height=24):
-        return []
-
-    def file_queued(self):
-        pass
-
-    def file_skipped(self):
-        pass
-
-    def traversal_finished(self):
-        pass
-
-    def file_started(self, name, total):
-        pass
-
-    def file_progress(self, name, downloaded):
-        pass
-
-    def file_finished(self, name, ok=True):
-        pass
-
-
-class ProgressReporter:
-    """A block of lines repainted in place: one per transfer in flight,
-    plus a totals line, in the manner of a package manager.
-
-    Workers only ever touch counters. One reporter thread owns the
-    terminal block and is the only thing that writes to it, which is
-    what stops concurrent transfers from shredding each other's output.
-    """
-
-    # Column widths for the numbers. These are minimums: a value wider
-    # than its column pushes the name column in rather than the line out
-    SIZE_WIDTH = 10
-    RATE_WIDTH = 12
-    ETA_WIDTH = 5
-    PCT_WIDTH = 4
-    # Everything right of the name, bar excluded: four gaps plus the
-    # four columns above
-    TAIL_WIDTH = 4 + SIZE_WIDTH + RATE_WIDTH + ETA_WIDTH + PCT_WIDTH
-    MIN_NAME = 10
-    MAX_BAR = 20
-    MIN_BAR = 6
-    # Longest the display may hold up a run that is leaving
-    STOP_WAIT = 2.0
-
-    def __init__(self, stream=None, slots=1, interval=0.2, window=3.0,
-                 style=DEFAULT_PROGRESS_STYLE, big_trains=False):
-        self.stream = sys.stderr if stream is None else stream
-        # With a style that has a scene: give every download one, not
-        # only the totals, when the terminal is tall enough
-        self.big_trains = big_trains
-        self.slots = max(1, int(slots))
-        self.interval = interval
-        self.window = window
-        self.style = PROGRESS_STYLES.get(
-            style, PROGRESS_STYLES[DEFAULT_PROGRESS_STYLE]
-        )
-        # Bumped every repaint, so the munchers chomp on their own even
-        # when a transfer is barely moving
-        self._frame = 0
-
-        self._lock = threading.Lock()
-        self._files = {}                      # name -> dict of counters
-        self._slot_names = [None] * self.slots
-        self._done = 0
-        self._failed = 0
-        self._skipped = 0
-        self._queued = 0
-        self._bytes = 0                       # bytes from finished files
-        self._walk_done = False
-        self._started_at = time.time()
-        self._overall = []                    # (when, bytes seen so far)
-
-        self._thread = None
-        self._stop = threading.Event()
-        self._painted = 0                     # lines currently on screen
-        # Held for every write to the terminal, block or log line alike.
-        # Reentrant, because a log line clears and repaints the block
-        self._term = threading.RLock()
-        self._hooked = []                     # log handlers routed via us
-        # Shown on the totals line, for -j auto to say where it is
-        self.jobs_note = None
-
-    # -- lifecycle ---------------------------------------------------
-
-    def enabled(self):
-        try:
-            return bool(self.stream.isatty())
-        except Exception:
-            return False
-
-    def start(self):
-        if not self.enabled() or self._thread is not None:
-            return
-        self._started_at = time.time()
-        self._stop.clear()
-        self.attach_logging()
-        self._thread = threading.Thread(target=self._loop, daemon=True)
-        self._thread.start()
-
-    def stop(self):
-        if self._thread is None:
-            return
-        self._stop.set()
-        # Bounded: a painter stuck on a wedged terminal must not keep
-        # the run from leaving, and it is a daemon thread anyway
-        self._thread.join(timeout=self.STOP_WAIT)
-        self._thread = None
-        self.detach_logging()
-        self.clear(wait=self.STOP_WAIT)
-
-    def forget_painted(self):
-        """Draw the block afresh from here on, rather than over the rows
-        it last used. For when something has written to the terminal
-        without going through the lock, which only the Ctrl-C notice does
-        """
-        self._painted = 0
-
-    def attach_logging(self):
-        """Route log lines bound for the terminal through the block.
-
-        A log line written while the block is on screen lands inside it
-        and pushes it down a row, so the next repaint starts a row too
-        low and leaves the old top row behind, frozen. That is where
-        duplicated rows and bars stuck at 100% came from. Instead, each
-        line clears the block, is written, and the block is redrawn
-        under it, all under the one terminal lock
-        """
-        for handler in logging.getLogger().handlers:
-            stream = getattr(handler, "stream", None)
-            if handler in [h for h, _ in self._hooked]:
-                continue
-            try:
-                to_terminal = bool(stream.isatty())
-            except Exception:
-                to_terminal = False
-            if not to_terminal:
-                continue
-            original = handler.emit
-
-            def emit(record, original=original):
-                with self._term:
-                    self.clear()
-                    original(record)
-                    self.paint()
-
-            handler.emit = emit
-            self._hooked.append((handler, original))
-
-    def detach_logging(self):
-        for handler, _ in self._hooked:
-            try:
-                del handler.emit
-            except AttributeError:
-                pass
-        self._hooked = []
-
-    @contextlib.contextmanager
-    def printing(self):
-        """For output that is not logging, like --print-urls"""
-        with self._term:
-            self.clear()
-            try:
-                yield
-            finally:
-                if self._thread is not None or self._hooked:
-                    self.paint()
-
-    # -- what the workers report -------------------------------------
-
-    def file_queued(self):
-        with self._lock:
-            self._queued += 1
-
-    def file_skipped(self):
-        """Queued, then found not to need downloading after all"""
-        with self._lock:
-            self._skipped += 1
-
-    def traversal_finished(self):
-        """No more files will be queued, so the totals can show a bar"""
-        with self._lock:
-            self._walk_done = True
-
-    def file_started(self, name, total):
-        with self._lock:
-            self._files[name] = {
-                "done": 0, "total": total, "samples": [],
-            }
-            if name not in self._slot_names:
-                if None in self._slot_names:
-                    self._slot_names[self._slot_names.index(None)] = name
-                else:
-                    self._slot_names.append(name)
-
-    def file_progress(self, name, downloaded):
-        # Hot path: one dict write per chunk. Sampling for rates happens
-        # in the reporter thread, not here
-        with self._lock:
-            entry = self._files.get(name)
-            if entry is not None:
-                entry["done"] = downloaded
-
-    def file_finished(self, name, ok=True):
-        with self._lock:
-            entry = self._files.pop(name, None)
-            if name in self._slot_names:
-                self._slot_names[self._slot_names.index(name)] = None
-            if ok:
-                self._done += 1
-                if entry is not None:
-                    self._bytes += entry["done"]
-            else:
-                self._failed += 1
-
-    # -- rates -------------------------------------------------------
-
-    def _sample(self, now):
-        """Called from the paint loop, so sampling costs the transfers
-        nothing
-        """
-        seen = self._bytes
-        for entry in self._files.values():
-            seen += entry["done"]
-            samples = entry["samples"]
-            samples.append((now, entry["done"]))
-            while len(samples) > 2 and now - samples[0][0] > self.window:
-                samples.pop(0)
-
-        self._overall.append((now, seen))
-        while (len(self._overall) > 2
-               and now - self._overall[0][0] > self.window):
-            self._overall.pop(0)
-        return seen
-
-    @staticmethod
-    def _rate(samples):
-        if len(samples) < 2:
-            return None
-        elapsed = samples[-1][0] - samples[0][0]
-        if elapsed <= 0:
-            return None
-        moved = samples[-1][1] - samples[0][1]
-        return moved / elapsed if moved > 0 else 0.0
-
-    # -- rendering ---------------------------------------------------
-
-    def _layout(self, width):
-        """Widest bar that still leaves room for a name.
-
-        A row is name + space + TAIL_WIDTH + bar + 2 brackets, and one
-        column is kept spare so the terminal does not wrap it, so the
-        bar can have whatever is left over after MIN_NAME.
-        """
-        bar = max(self.MIN_BAR, min(
-            self.MAX_BAR,
-            width - self.MIN_NAME - self.TAIL_WIDTH - 4,
-        ))
-        name = width - self.TAIL_WIDTH - bar - 4
-        return name, bar
-
-    def _fits(self, width):
-        return width >= self.MIN_NAME + self.TAIL_WIDTH + self.MIN_BAR + 4
-
-    def _compose(self, label, size, rate, eta, bar, pct, width):
-        """Lay out one row.
-
-        The tail is built first and measured, and the name gets whatever
-        is left. A number wider than its column then costs the name a
-        character instead of pushing the whole line past the terminal.
-        """
-        tail = "{size:>{sw}} {rate:>{rw}} {eta:>{ew}} {bar} {pct:>{pw}}".format(
-            size=size, sw=self.SIZE_WIDTH,
-            rate=rate, rw=self.RATE_WIDTH,
-            eta=eta, ew=self.ETA_WIDTH,
-            bar=bar,
-            pct=pct, pw=self.PCT_WIDTH,
-        )
-        name_width = max(self.MIN_NAME, width - len(tail) - 2)
-        return (_fit(label, name_width) + " " + tail).rstrip()
-
-    def _slot_line(self, name, entry, width):
-        _, bar_width = self._layout(width)
-        total = entry["total"]
-        done = entry["done"]
-        rate = self._rate(entry["samples"])
-
-        fraction = (done / total) if total else None
-        if total and rate:
-            eta = _format_clock((total - done) / rate) if rate > 0 else "--:--"
-        else:
-            eta = "--:--"
-
-        return self._compose(
-            label=name,
-            size=_human_size(total if total else done),
-            rate=(_human_size(rate) + "/s") if rate else "--",
-            eta=eta,
-            bar=_muncher_bar(fraction, bar_width, self.style, self._frame),
-            pct="{0}%".format(int(fraction * 100)) if fraction is not None
-            else "--",
-            width=width,
-        )
-
-    def _idle_line(self, width):
-        _, bar_width = self._layout(width)
-        return self._compose(
-            label="", size="", rate="", eta="",
-            bar=" " * (bar_width + 2), pct="", width=width,
-        )
-
-    def _total_line(self, seen, width):
-        _, bar_width = self._layout(width)
-        expected = max(0, self._queued - self._skipped)
-        rate = self._rate(self._overall)
-
-        label = "Total {done}/{expected}".format(
-            done=self._done, expected=expected if expected else "?"
-        )
-        if self._failed:
-            label += " ({failed} failed)".format(failed=self._failed)
-        if not self._walk_done:
-            label += " so far"
-        if self.jobs_note:
-            label += " · " + self.jobs_note
-
-        if self._walk_done and expected:
-            fraction = min(1.0, self._done / expected)
-            bar = _bar(fraction, bar_width)
-            right = "{0}%".format(int(fraction * 100))
-        else:
-            bar = " " * (bar_width + 2)
-            right = "--"
-
-        return self._compose(
-            label=label,
-            size=_human_size(seen),
-            rate=(_human_size(rate) + "/s") if rate else "--",
-            eta=_format_clock(time.time() - self._started_at),
-            bar=bar,
-            pct=right,
-            width=width,
-        )
-
-    def render(self, width=80, height=24):
-        """The whole block, as a list of lines"""
-        now = time.time()
-        with self._lock:
-            seen = self._sample(now)
-            names = list(self._slot_names)
-            files = {n: dict(e) for n, e in self._files.items()}
-
-            if not self._fits(width):
-                return [self._compact(seen, width)]
-
-            each, total = self._scenes(len(names), width, height)
-            if each is None:
-                return [self._compact(seen, width)]
-
-            # One column short of the edge, like every other row, so the
-            # terminal never wraps one and throws the repaint out
-            scene_width = width - 1
-            lines = []
-            for name in names:
-                entry = files.get(name)
-                if entry is None:
-                    lines.append(self._idle_line(width))
-                    if each:
-                        lines.extend(sl_train.scene(
-                            None, scene_width, self._frame, empty=True))
-                else:
-                    lines.append(self._slot_line(name, entry, width))
-                    if each:
-                        lines.extend(sl_train.scene(
-                            self._fraction(entry), scene_width, self._frame))
-            lines.append(self._total_line(seen, width))
-            if total:
-                lines.extend(sl_train.scene(
-                    self._total_fraction(), scene_width, self._frame))
-            return lines
-
-    def _scenes(self, slots, width, height):
-        """(a scene per download, a scene for the totals), whichever of
-        those fit, best first; (None, None) when not even plain rows do.
-        A row is always left for the shell
-        """
-        tall = sl_train.HEIGHT + 1
-        scene = (
-            self.style.get("scene") == "sl"
-            and sl_train.cars_for(width - 1) >= 0
-        )
-        options = []
-        if scene and self.big_trains:
-            options.append((True, True))
-        if scene:
-            options.append((False, True))
-        options.append((False, False))
-        for each, total in options:
-            lines = slots * (1 + (tall if each else 0)) + 1 + (tall if total else 0)
-            if height >= lines + 2:
-                return each, total
-        return None, None
-
-    @staticmethod
-    def _fraction(entry):
-        total = entry["total"]
-        return (entry["done"] / total) if total else None
-
-    def _total_fraction(self):
-        expected = max(0, self._queued - self._skipped)
-        if self._walk_done and expected:
-            return min(1.0, self._done / expected)
-        return None
-
-    def _compact(self, seen, width):
-        """One line, for a terminal too small for the block"""
-        active = len(self._files)
-        rate = self._rate(self._overall)
-        parts = ["{0} done".format(self._done)]
-        if self._failed:
-            parts.append("{0} failed".format(self._failed))
-        parts.append("{0} active".format(active))
-        parts.append(_human_size(seen))
-        if rate:
-            parts.append(_human_size(rate) + "/s")
-        line = " · ".join(parts)
-        return line[:max(0, width - 1)]
-
-    # -- terminal ----------------------------------------------------
-
-    def _write(self, text):
-        try:
-            self.stream.write(text)
-            self.stream.flush()
-        except Exception:
-            pass
-
-    def clear(self, wait=None):
-        """Wipe the block so ordinary log output lands on clean rows.
-
-        wait bounds how long to wait for the terminal; past it the block
-        is left as it is rather than holding anything up
-        """
-        if not self._term.acquire(timeout=-1 if wait is None else wait):
-            return
-        try:
-            if not self._painted or not self.enabled():
-                self._painted = 0
-                return
-            out = ["\033[{0}A".format(self._painted)]
-            out.extend(["\r\033[K\n"] * self._painted)
-            out.append("\033[{0}A".format(self._painted))
-            self._painted = 0
-            self._write("".join(out))
-        finally:
-            self._term.release()
-
-    def paint(self):
-        if not self.enabled():
-            return
-        with self._term:
-            self._paint()
-
-    def _paint(self):
-        try:
-            size = shutil.get_terminal_size((80, 24))
-            width, height = size.columns, size.lines
-        except Exception:
-            width, height = 80, 24
-
-        self._frame += 1
-        lines = self.render(width, height)
-
-        out = []
-        if self._painted:
-            out.append("\033[{0}A".format(self._painted))
-        for line in lines:
-            out.append("\r\033[K" + line[:width - 1] + "\n")
-
-        extra = self._painted - len(lines)
-        if extra > 0:
-            out.extend(["\r\033[K\n"] * extra)
-            out.append("\033[{0}A".format(extra))
-
-        self._painted = len(lines)
-        self._write("".join(out))
-
-    def _loop(self):
-        while not self._stop.is_set():
-            self.paint()
-            self._stop.wait(self.interval)
-
-
 def _file_size(path):
     try:
         return os.path.getsize(path)
@@ -964,17 +333,6 @@ def _clean_name(dirty_str):
     return "".join(clean).strip().rstrip(".")
 
 
-def _human_size(num_bytes):
-    """Format a byte count the way a human would read it"""
-    size = float(num_bytes)
-    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if abs(size) < 1024 or unit == "TiB":
-            if unit == "B":
-                return "{size:.0f} {unit}".format(size=size, unit=unit)
-            return "{size:.2f} {unit}".format(size=size, unit=unit)
-        size /= 1024
-
-
 def _file_ext(filename):
     """Lowercase extension of a filename, or '' when it has none"""
     if "." not in filename:
@@ -1021,7 +379,6 @@ class DownloadLibrary:
         library_path,
         cookie_path=None,
         cookie_auth=None,
-        progress_bar=False,
         ext_include=None,
         ext_exclude=None,
         platform_include=None,
@@ -1037,10 +394,9 @@ class DownloadLibrary:
         jobs=1,
         retries=5,
         verify=True,
-        progress_style=DEFAULT_PROGRESS_STYLE,
-        train_per_download=False,
         shutdown_grace=None,
         log_skipped=True,
+        listener=None,
     ):
         self.library_path = library_path
         # "auto" runs as many workers as it might ever want, and a gate
@@ -1066,25 +422,13 @@ class DownloadLibrary:
             0.0,
             float(SHUTDOWN_GRACE if shutdown_grace is None else shutdown_grace),
         )
-        self.progress_bar = progress_bar
-        # Several \r progress bars writing at once is unreadable, so the
-        # per-file bar is for sequential runs. In parallel one reporter
-        # thread owns a single status line for the whole pool
-        self._show_bar = progress_bar and self.jobs == 1
-        self._show_status = progress_bar and self.jobs > 1
-        self.progress_style = progress_style
-        self._progress = (
-            ProgressReporter(
-                slots=self._gate.limit,
-                style=progress_style,
-                big_trains=train_per_download,
-            )
-            if self._show_status
-            else NullReporter()
-        )
+        # Whoever is showing the run. The engine only ever tells it what
+        # happened (see events.py); how that looks is up to it
+        self.events = listener if listener is not None else Listener()
 
         self._queue = None
         self._workers = []
+        self._downloads_announced = False
         self._stop = threading.Event()
         self._cache_lock = threading.Lock()
         # The cache is written at most every CACHE_FLUSH_SECONDS, and
@@ -1294,6 +638,9 @@ class DownloadLibrary:
             # as during traversal, and it has to be caught either way
             try:
                 self._start_workers()
+                if self.dry_run is not True:
+                    self._downloads_announced = True
+                    self.events.downloads_started(self._gate.limit)
 
                 for order_id, order in self._all_orders():
                     if self._stop.is_set():
@@ -1304,7 +651,7 @@ class DownloadLibrary:
 
                 # Everything is queued, so the totals have a real
                 # denominator now and can show a bar
-                self._progress.traversal_finished()
+                self.events.traversal_finished()
 
                 self._stop_workers()
 
@@ -1314,8 +661,10 @@ class DownloadLibrary:
                     raise LibraryPathError(self._fatal)
 
                 if self._stop.is_set():
-                    # A sequential transfer was interrupted
-                    sys.exit(INTERRUPT_EXIT_CODE)
+                    # Asked to stop from outside, or a sequential transfer
+                    # was interrupted
+                    logger.warning("Stopped, nothing further was downloaded")
+                    raise RunStopped()
             except SiteError:
                 # Reading the library failed partway, usually an expired
                 # cookie. Downloads in flight get to finish their chunk
@@ -1329,7 +678,7 @@ class DownloadLibrary:
                 # left behind rather than holding the run open
                 self._stop_workers(timeout=self.shutdown_grace)
                 logger.warning("Interrupted, nothing further was downloaded")
-                sys.exit(INTERRUPT_EXIT_CODE)
+                raise RunStopped()
         finally:
             # However the run ends, what it learned is kept
             try:
@@ -1338,6 +687,7 @@ class DownloadLibrary:
                 logger.error("Could not save the cache: {0}".format(error))
             self._restore_interrupt_handler(previous_handler)
 
+        self.events.run_ending()
         if self.dry_run is True:
             self._log_dry_run_summary()
 
@@ -1421,6 +771,21 @@ class DownloadLibrary:
                 pass
         os._exit(INTERRUPT_EXIT_CODE)
 
+    def request_stop(self):
+        """Stop as tidily as a first Ctrl-C does: start nothing new, let
+        transfers in flight stop at their next chunk, keep their part
+        files to resume from, and save the cache. Safe from any thread.
+        start() then raises RunStopped"""
+        if self._stop.is_set():
+            return
+        self._stop.set()
+        self.events.stopping()
+        logger.warning("Stopping. Waiting for downloads in flight")
+
+    def force_stop(self):
+        """Leave now, as a second Ctrl-C does"""
+        self._hard_exit()
+
     def _install_interrupt_handler(self):
         """First Ctrl-C asks for a tidy stop, second one insists.
 
@@ -1447,7 +812,7 @@ class DownloadLibrary:
             # Straight to the descriptor: no locks, no buffer another
             # thread might be in the middle of. The block is drawn afresh
             # below this rather than over it
-            self._progress.forget_painted()
+            self.events.stopping()
             _write_fd(
                 2,
                 "\nStopping. Waiting for downloads in flight, press "
@@ -1554,12 +919,10 @@ class DownloadLibrary:
                     start=self._gate.limit, most=self.jobs
                 )
             )
-            self._progress.jobs_note = "{0} at once".format(self._gate.limit)
         else:
             logger.info(
                 "Downloading with {jobs} parallel jobs".format(jobs=self.jobs)
             )
-        self._progress.start()
 
         # Bounded, so traversal cannot run far ahead of the downloads
         self._queue = queue.Queue(maxsize=self.jobs * 4)
@@ -1616,7 +979,7 @@ class DownloadLibrary:
                         rate=_human_size(rate),
                     )
                 )
-            self._progress.jobs_note = "{0} at once".format(new)
+            self.events.jobs_changed(new)
 
             started, moved = now, total
             throttled = self._throttled_count
@@ -1628,6 +991,7 @@ class DownloadLibrary:
             self._tuner_thread.join(timeout=2)
             self._tuner_thread = None
         if self._queue is None:
+            self._announce_downloads_finished()
             return
 
         for _ in self._workers:
@@ -1649,7 +1013,7 @@ class DownloadLibrary:
         self._workers = []
         self._queue = None
 
-        self._progress.stop()
+        self._announce_downloads_finished()
 
         if stubborn:
             # A transfer is wedged somewhere uninterruptible. The user
@@ -1661,6 +1025,11 @@ class DownloadLibrary:
                 )
             )
             self._hard_exit()
+
+    def _announce_downloads_finished(self):
+        if self._downloads_announced:
+            self._downloads_announced = False
+            self.events.downloads_finished()
 
     def _worker(self):
         while True:
@@ -1736,6 +1105,7 @@ class DownloadLibrary:
         bundle_title = _clean_name(order["product"]["human_name"])
         self._current_bundle = bundle_title
         logger.info("Checking bundle: " + str(bundle_title))
+        self.events.bundle_started(bundle_title)
         for product in order.get("subproducts", []):
             self._process_product(order_id, bundle_title, product)
 
@@ -2118,8 +1488,7 @@ class DownloadLibrary:
                     return
             # Straight to stdout, one per line, so the list stays usable
             # when piped into another tool. All logging goes to stderr
-            with self._progress.printing():
-                print(url)
+            self.events.output(str(url))
 
     def _get_remote_headers(self, remote_file):
         """Headers only, so nothing is transferred to size up a file"""
@@ -2313,6 +1682,9 @@ class DownloadLibrary:
         synchronous=False,
         hashes=None,
     ):
+        if self._stop.is_set():
+            # Stopping: nothing more is started, whatever the walk finds
+            return False
         cache_file_info = self.cache_data.get(cache_file_key, {})
 
         if cache_file_info != {} and self.update is not True:
@@ -2355,13 +1727,19 @@ class DownloadLibrary:
             "listed_size": file_size,
         }
 
-        self._progress.file_queued()
+        self.events.file_queued()
 
         if self._queue is not None and synchronous is False:
-            # Hand it to a worker. Blocks once the queue is full, which
-            # keeps traversal from running away from the downloads
-            self._queue.put(job)
-            return False
+            # Hand it to a worker. Waits while the queue is full, which
+            # keeps traversal from running away from the downloads, but
+            # not past a stop
+            while True:
+                try:
+                    self._queue.put(job, timeout=0.5)
+                    return False
+                except queue.Full:
+                    if self._stop.is_set():
+                        return False
 
         return self._run_download_job(job)
 
@@ -2444,7 +1822,7 @@ class DownloadLibrary:
 
     def _note_skip(self):
         """Queued, then turned out not to need downloading"""
-        self._progress.file_skipped()
+        self.events.file_skipped()
 
     def _library_vanished(self):
         """The library root is no longer there.
@@ -2759,10 +2137,6 @@ class DownloadLibrary:
             _remove_quietly(_resume_note(part_file))
 
         except (Exception, KeyboardInterrupt) as e:
-            if self._show_bar:
-                # Do not overwrite the progress bar on next print
-                print()
-
             stopped = isinstance(e, (Interrupted, KeyboardInterrupt))
             if isinstance(e, Interrupted):
                 # Asked to stop, so this is not a failure worth shouting,
@@ -2785,8 +2159,7 @@ class DownloadLibrary:
                 )
                 self._record_failure(local_filename, str(e) or type(e).__name__)
 
-            self._progress.file_finished(label, ok=False)
-            self._progress.clear()
+            self.events.file_finished(label, ok=False)
 
             # A stopped transfer keeps what it has, for the next run to
             # carry on from. A failed one is thrown away: what it holds
@@ -2801,21 +2174,18 @@ class DownloadLibrary:
                 # start() shut the run down once the workers are joined
                 self._stop.set()
                 if threading.current_thread() is threading.main_thread():
-                    sys.exit(INTERRUPT_EXIT_CODE)
+                    raise RunStopped()
 
             result = False
 
         else:
-            if self._show_bar:
-                # Do not overwrite the progress bar on next print
-                print()
             if "url_last_modified" not in file_info:
                 # no Last-Modified header so we set the time of the current download
                 # this will result in the file not being re-downloaded by default later
                 file_info["url_last_modified"] = datetime.datetime.now().strftime(
                     "%a, %d %b %Y %H:%M:%S %Z"
                 )
-            self._progress.file_finished(label, ok=True)
+            self.events.file_finished(label, ok=True)
 
             self._update_cache_data(cache_file_key, file_info)
             self._log_finished(local_filename, written, time.time() - started)
@@ -2887,7 +2257,7 @@ class DownloadLibrary:
         """
         # The block already shows what is in flight, and a line per start
         # on top of a line per finish just scrolls the history away
-        (logger.debug if self._show_status else logger.info)(
+        (logger.debug if self.events.shows_transfers else logger.info)(
             "Downloading: {local_filename}".format(local_filename=local_filename)
         )
 
@@ -2917,9 +2287,9 @@ class DownloadLibrary:
         # leaves is only resumable if this is already there
         _write_resume_note(part_file, validator)
 
-        self._progress.file_started(label, total)
+        self.events.file_started(label, total)
         if already:
-            self._progress.file_progress(label, already)
+            self.events.file_progress(label, already)
 
         # What the last download that failed its checksum hashed to
         mismatched = None
@@ -2993,8 +2363,8 @@ class DownloadLibrary:
                 validator = _validator_for(response) or validator
 
                 # A resume changes what the whole file weighs
-                self._progress.file_started(label, total)
-                self._progress.file_progress(label, already)
+                self.events.file_started(label, total)
+                self.events.file_progress(label, already)
 
     def _print_checksum(self, local_file, hashes):
         """The checksum Humble lists for a file about to be downloaded, as
@@ -3008,17 +2378,16 @@ class DownloadLibrary:
         with self._notice_lock:
             header = not self._checksum_header_done
             self._checksum_header_done = True
-        with self._progress.printing():
-            if header:
-                print(
-                    "# sha1 as Humble lists them. To check, from inside the "
-                    "library: shasum -c <this list>. A file Humble has "
-                    "replaced since will not match its listing"
-                )
-            if sha1:
-                print("{sha1}  {path}".format(sha1=sha1, path=path))
-            else:
-                print("# no sha1 listed: {path}".format(path=path))
+        if header:
+            self.events.output(
+                "# sha1 as Humble lists them. To check, from inside the "
+                "library: shasum -c <this list>. A file Humble has "
+                "replaced since will not match its listing"
+            )
+        if sha1:
+            self.events.output("{sha1}  {path}".format(sha1=sha1, path=path))
+        else:
+            self.events.output("# no sha1 listed: {path}".format(path=path))
 
     def _record_failure(self, local_file, reason):
         """A file this run gave up on. A run being stopped is not a
@@ -3240,10 +2609,8 @@ class DownloadLibrary:
                 self._count_bytes(len(data))
                 if hasher is not None:
                     hasher.update(data)
-                if self._show_bar:
-                    self._draw_bar(written, total)
-                elif label is not None:
-                    self._progress.file_progress(label, written)
+                if label is not None:
+                    self.events.file_progress(label, written)
 
         if total is not None and written < total:
             raise ValueError(
@@ -3252,27 +2619,9 @@ class DownloadLibrary:
                 )
             )
         if total is not None and written > total:
-            if self._show_bar:
-                print()
             logger.warning("Downloaded more content than expected")
 
         return written
-
-    def _draw_bar(self, written, total):
-        if total is None:  # no content length header
-            print("\t{written}".format(written=written), end="\r")
-            return
-
-        pb_width = 50
-        done = int(pb_width * written / total)
-        print(
-            "\t{percent}% [{filler}{space}]".format(
-                percent=int(done * (100 / pb_width)),
-                filler="=" * min(max(done, 0), pb_width),
-                space=" " * min(max((pb_width - done), 0), pb_width),
-            ),
-            end="\r",
-        )
 
     def _load_cache_data(self, cache_file):
         self._clear_stale_cache_temps(cache_file)

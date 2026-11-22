@@ -9,7 +9,7 @@ import re
 import logging
 import threading
 
-from humblebundle_downloader.download_library import ProgressReporter
+from humblebundle_downloader.classic_display import ProgressReporter
 
 CSI = re.compile(r"\x1b\[(\d*)([AK])")
 

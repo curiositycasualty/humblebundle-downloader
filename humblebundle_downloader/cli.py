@@ -259,6 +259,27 @@ def resolve_jobs(cli_args):
     return 1 if cli_args.no_parallel else cli_args.jobs
 
 
+def make_listener(cli_args, jobs):
+    """What shows the run. The engine reports events and this decides
+    how they look"""
+    from .events import Listener
+
+    if not cli_args.progress:
+        return Listener()
+    from .classic_display import ProgressReporter, SingleBar
+
+    if jobs == 1:
+        return SingleBar()
+    from .auto_jobs import START
+
+    slots = START if isinstance(jobs, str) else jobs
+    return ProgressReporter(
+        slots=slots,
+        style=cli_args.progress_style,
+        big_trains=cli_args.train_per_download,
+    )
+
+
 def cli():
     cli_args = parse_args(sys.argv[1:])
 
@@ -278,7 +299,6 @@ def cli():
             cli_args.library_path,
             cookie_path=cli_args.cookie_file,
             cookie_auth=cli_args.session_auth,
-            progress_bar=cli_args.progress,
             ext_include=cli_args.include,
             ext_exclude=cli_args.exclude,
             platform_include=cli_args.platform,
@@ -291,13 +311,12 @@ def cli():
             print_urls=cli_args.print_urls,
             print_checksums=cli_args.print_checksums,
             accept_smaller=cli_args.accept_smaller,
-            progress_style=cli_args.progress_style,
-            train_per_download=cli_args.train_per_download,
             jobs=jobs,
             retries=cli_args.retries,
             verify=not cli_args.no_verify,
             shutdown_grace=cli_args.exit_timeout,
             log_skipped=not cli_args.hide_skipped,
+            listener=make_listener(cli_args, jobs),
         )
         library.start()
     except (LibraryPathError, SiteError) as error:
