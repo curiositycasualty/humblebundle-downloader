@@ -9,7 +9,7 @@ import pytest
 from rich.console import Console
 
 from humblebundle_downloader import tui
-from humblebundle_downloader.download_library import RunStopped
+from humblebundle_downloader.errors import RunStopped
 from humblebundle_downloader.run_state import RunState
 
 
@@ -311,7 +311,7 @@ def test_a_stop_ends_the_run_with_the_stopped_status():
 
 
 def test_run_hands_the_terminal_back_and_raises_what_the_run_raised(capsys):
-    from humblebundle_downloader.download_library import LibraryPathError
+    from humblebundle_downloader.errors import LibraryPathError
 
     listener = tui.TuiListener()
     library = FakeLibrary(listener, hold=threading.Event(), fail=LibraryPathError("gone"))

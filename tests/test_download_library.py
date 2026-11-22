@@ -22,21 +22,29 @@ from humblebundle_downloader.events import Listener
 from humblebundle_downloader.progress_styles import _muncher_bar
 from humblebundle_downloader.download_library import (
     DownloadLibrary,
+    SHUTDOWN_GRACE,
+)
+from humblebundle_downloader.errors import (
     Interrupted,
     LibraryPathError,
-    SHUTDOWN_GRACE,
-    _mount_hint,
     ChecksumMismatch,
+)
+from humblebundle_downloader.files import (
+    _mount_hint,
     _digest_of,
     _feed_hash_from_file,
     _struct_hashes,
-    _validator_for,
-    _unique_keys,
     _coerce_size,
     _file_ext,
-    _human_size,
-    _content_range_total,
+)
+from humblebundle_downloader.formatting import _human_size
+from humblebundle_downloader.walk import (
+    _unique_keys,
     _order_error,
+)
+from humblebundle_downloader.web import (
+    _validator_for,
+    _content_range_total,
     _retry_after_seconds,
     USER_AGENT,
 )
@@ -245,8 +253,11 @@ def _names(selected):
 
 
 def _select(struct, **kwargs):
+    from humblebundle_downloader.models import FileEntry
+
     dl = DownloadLibrary("fake_library_path", **kwargs)
-    return dl._select_by_format(struct, "Item", "ebook")
+    entries = [FileEntry.from_struct(s) for s in struct]
+    return [entry.struct for entry in dl._select_by_format(entries, "Item", "ebook")]
 
 
 def test_prefer_format_off_keeps_everything():
@@ -1738,7 +1749,7 @@ def test_the_cache_is_not_rewritten_after_every_file(tmp_path, monkeypatch):
 
 
 def test_the_cache_is_written_again_once_the_interval_passes(tmp_path, monkeypatch):
-    import humblebundle_downloader.download_library as module
+    import humblebundle_downloader.cache as module
 
     now = [1000.0]
     monkeypatch.setattr(module.time, "time", lambda: now[0])

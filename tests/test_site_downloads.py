@@ -8,10 +8,8 @@ import threading
 import pytest
 
 from humblebundle_downloader.events import Listener
-from humblebundle_downloader.download_library import (
-    DownloadLibrary,
-    _looks_like_cookie_header,
-)
+from humblebundle_downloader.download_library import DownloadLibrary
+from humblebundle_downloader.web import _looks_like_cookie_header
 from humblebundle_downloader.humble_site import NotSignedIn
 
 from .test_humble_site import (
@@ -1076,7 +1074,7 @@ def test_platform_windows_keeps_only_the_game(tmp_path):
 # The runtime at the end
 ###
 def test_human_duration():
-    from humblebundle_downloader.download_library import _human_duration
+    from humblebundle_downloader.formatting import _human_duration
 
     assert _human_duration(0.4) == "0s"
     assert _human_duration(59.6) == "1m 00s"
@@ -1094,7 +1092,7 @@ def test_the_runtime_is_the_last_thing_said(tmp_path, caplog):
     last = caplog.records[-1].getMessage()
     total = sum(len(body) for body in BODIES.values())
     assert last.startswith("Took ")
-    from humblebundle_downloader.download_library import _human_size
+    from humblebundle_downloader.formatting import _human_size
 
     assert ", downloading {0}".format(_human_size(total)) in last
 
@@ -1177,7 +1175,10 @@ def test_print_urls_goes_through_the_listener(tmp_path):
 
 @pytest.mark.parametrize("jobs", [1, 3])
 def test_request_stop_ends_the_run_tidily(tmp_path, jobs):
-    from humblebundle_downloader.download_library import RunStopped, INTERRUPT_EXIT_CODE
+    from humblebundle_downloader.errors import (
+    RunStopped,
+    INTERRUPT_EXIT_CODE,
+)
 
     heard = Recorder(stop_on="file_started")
     dl = library(tmp_path, FakeHumble(*two_bundles()), jobs=jobs, listener=heard)
