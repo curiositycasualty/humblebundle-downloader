@@ -189,6 +189,7 @@ class TransferMixin:
                 self._fatal = error
             self._stop.set()
         except Exception as error:
+            self._thread_local.trouble = "Humble gave no download url for it"
             logger.error(
                 "Could not get a download url for {name}: {error}".format(
                     name=url.filename, error=error
@@ -246,6 +247,9 @@ class TransferMixin:
 
         part_file = os.path.join(local_folder, local_filename) + ".part"
         resume = None
+        # Why there is no response, when there is none: set by whatever
+        # gave up on getting one
+        self._thread_local.trouble = None
         held = _resume_point(part_file)
         if held is not None:
             already, validator = held
@@ -269,7 +273,8 @@ class TransferMixin:
         if remote_file_r is None:
             self._note_skip()
             self._record_failure(
-                os.path.join(local_folder, local_filename), "no answer from the server"
+                os.path.join(local_folder, local_filename),
+                getattr(self._thread_local, "trouble", None) or "no answer from the server",
             )
             return False
 

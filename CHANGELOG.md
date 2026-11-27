@@ -48,6 +48,10 @@ The interface is new, and the engine underneath no longer draws anything itself.
 - `--reset-cache` starts a run from an empty cache, setting the old one aside as
   `.cache.json.reset-<date>.bak` rather than deleting it; files already on disk are recorded again,
   not downloaded
+- Files Humble lists with a folder in front of their name (`abramsbooks/book.epub`, as in the
+  Abrams ComicArts bundle) download again: the url is looked up under the name as listed, and
+  failing that under the bare name when only one file has it. They are still saved under the bare
+  name. A file with no signed url is reported as that, not as "no answer from the server"
 - New dependencies: rich and textual (and tomli on Python 3.10)
 
 

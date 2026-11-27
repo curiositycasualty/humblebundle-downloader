@@ -810,3 +810,40 @@ def test_items_missing_from_a_bundle_page_are_read_several_at_once():
     orders = dict(HumbleSite(fake, readers=3).orders())
     assert [s["human_name"] for s in orders["b1"]["subproducts"]] == ["Book %d" % n for n in range(count)]
     assert fake.most == 3
+
+
+###
+# Names with a folder in front, as Abrams' books are listed and signed
+###
+class NamedSite:
+    def __init__(self, urls):
+        self.urls = urls
+
+    def sign(self, ids, session=None, vault=False):
+        return dict(self.urls), None
+
+
+def test_a_name_with_a_folder_is_found_under_other_download_keys():
+    # The keys Humble signs under are not the ones its pages give
+    signer = UrlSigner(NamedSite({
+        ("signed-key-1", "abramsbooks/book.pdf"): "https://x/book.pdf",
+        ("signed-key-2", "abramsbooks/book.epub"): "https://x/book.epub",
+    }))
+    assert signer.url_for("e", "page-key", "abramsbooks/book.epub") == "https://x/book.epub"
+
+
+def test_a_bare_name_finds_a_signed_name_with_a_folder_and_back():
+    signer = UrlSigner(NamedSite({("k", "abramsbooks/book.epub"): "https://x/1"}))
+    assert signer.url_for("e", "other", "book.epub") == "https://x/1"
+    signer = UrlSigner(NamedSite({("k", "book.epub"): "https://x/2"}))
+    assert signer.url_for("e2", "other", "abramsbooks/book.epub") == "https://x/2"
+
+
+def test_the_same_bare_name_in_two_folders_is_not_guessed():
+    signer = UrlSigner(NamedSite({
+        ("k1", "a/book.epub"): "https://x/a",
+        ("k2", "b/book.epub"): "https://x/b",
+    }))
+    with pytest.raises(SiteError):
+        signer.url_for("e", "other", "book.epub")
+    assert signer.url_for("e", "other", "a/book.epub") == "https://x/a"

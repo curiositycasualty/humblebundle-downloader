@@ -1413,3 +1413,33 @@ def test_reset_cache_is_refused_with_verify_and_in_settings(tmp_path, monkeypatc
         parse_args(["-l", "x", "-s", "y"])
     assert "chosen on the command line" in capsys.readouterr().err
     assert parse_args(["-l", "x", "-s", "y", "--reset-cache", "--no-config"]).reset_cache is True
+
+
+def test_files_listed_with_a_folder_download_under_their_own_name(tmp_path):
+    # As Humble lists and signs Abrams' books: "abramsbooks/x.epub",
+    # signed under download keys the page does not give
+    body = b"an abrams book" * 50
+    struct = real_struct("smoke.epub", body=body, kind="EPUB")
+    struct["url"]["web"] = "abramsbooks/smoke.epub"
+    entries = [entry("e1", "b1", "smokegetsinyoureyes", "Abrams")]
+    pages = {"/home/library/b1": bundle_page("b1", "Abrams", entitlement(
+        "e1", "smokegetsinyoureyes", download("page-key", "ebook", struct)))}
+    fake = FakeHumble(entries, pages, bodies={"smoke.epub": body})
+    fake._sign_reply = lambda ids: {"ok": True, "data": {"signedUrls": {"m": {
+        "signed-key": {"abramsbooks/smoke.epub": "https://cdn.example/smoke.epub?t=1"}}},
+        "expiresAt": "2030-01-01T00:00:00Z"}}
+    dl = library(tmp_path, fake, jobs=1)
+    dl.start()
+    assert files_under(tmp_path / "lib") == ["Abrams/smokegetsinyoureyes/smoke.epub"]
+    assert dl.failed_files == []
+
+
+def test_no_signed_url_is_reported_as_that(tmp_path):
+    fake = FakeHumble(*two_bundles())
+    fake._sign_reply = lambda ids: {"ok": True, "data": {"signedUrls": {"m": {
+        "k": {"something-else.pdf": "https://cdn.example/x?t=1"}}},
+        "expiresAt": "2030-01-01T00:00:00Z"}}
+    dl = library(tmp_path, fake, jobs=1)
+    dl.start()
+    reasons = {reason for _, reason in dl.failed_files}
+    assert reasons == {"Humble gave no download url for it"}

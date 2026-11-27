@@ -167,7 +167,9 @@ class WalkMixin:
                 self._signer,
                 entry.signing.entitlement,
                 entry.signing.download_key,
-                filename,
+                # Signed under the name the listing gives, folder and
+                # all; saved under just the file's own name
+                entry.url,
                 vault=entry.signing.vault,
             )
         if self._should_download_file_by_ext_and_log(filename) is False:

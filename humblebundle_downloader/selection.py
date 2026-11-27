@@ -115,7 +115,7 @@ class SelectionMixin:
             self._signer,
             entry.signing.entitlement,
             entry.signing.download_key,
-            entry.filename,
+            entry.url,
             vault=entry.signing.vault,
         )
         headers = self._get_remote_headers(url)

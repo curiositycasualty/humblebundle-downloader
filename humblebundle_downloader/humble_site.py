@@ -774,8 +774,19 @@ class UrlSigner:
         urls = signed[0]
         url = urls.get((download_key, filename))
         if url is None:
-            # Keyed differently than expected: settle for the filename
+            # Keyed differently than expected: settle for the name. The
+            # download keys Humble signs under need not be the ones its
+            # pages give, so the name is what really identifies a file
             matches = [u for (_, name), u in urls.items() if name == filename]
+            if len(matches) == 1:
+                url = matches[0]
+        if url is None:
+            # Some files are listed and signed with a folder in front,
+            # like "abramsbooks/book.epub". Asked for by the bare name,
+            # or the other way round, match on the last part alone when
+            # only one file has it
+            bare = filename.rsplit("/", 1)[-1]
+            matches = [u for (_, name), u in urls.items() if name.rsplit("/", 1)[-1] == bare]
             if len(matches) == 1:
                 url = matches[0]
         if url is None:
